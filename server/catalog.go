@@ -1005,6 +1005,11 @@ func initPgCatalog(db sqlExec, serverStartTime, processStartTime time.Time, serv
 
 		// pg_backend_pid - process ID of the backend
 		`CREATE OR REPLACE MACRO pg_backend_pid() AS 0`,
+		// pg_partition_ancestors - PG returns the relation plus its partition
+		// ancestors; DuckDB has no declarative partitioning, so the correct
+		// answer is always just the relation itself. psql \d queries this on
+		// every table since PG12.
+		`CREATE OR REPLACE MACRO pg_partition_ancestors(rel) AS rel`,
 
 		// pg_total_relation_size - total disk space used by table (stub, returns 0)
 		`CREATE OR REPLACE MACRO pg_total_relation_size(rel) AS 0`,

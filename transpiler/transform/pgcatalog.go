@@ -111,6 +111,7 @@ func NewPgCatalogTransformWithConfig(duckLakeMode bool) *PgCatalogTransform {
 			"array_remove":                    true, // Remove element from array macro
 			"to_number":                       true, // Parse formatted number string macro
 			"pg_backend_pid":                  true, // Backend process ID macro
+			"pg_partition_ancestors":          true, // Relation itself (no partitioning in DuckDB)
 			"pg_total_relation_size":          true, // Total table size stub
 			"pg_stat_get_numscans":            true, // Index/table scan count stub
 			"pg_relation_size":                true, // Table size stub
@@ -155,6 +156,7 @@ func NewPgCatalogTransformWithConfig(duckLakeMode bool) *PgCatalogTransform {
 			"array_remove":                    true, // Remove element from array
 			"to_number":                       true, // Parse formatted number string
 			"pg_backend_pid":                  true, // Backend process ID
+			"pg_partition_ancestors":          true, // Relation itself (no partitioning in DuckDB)
 			"pg_stat_get_numscans":            true, // Index/table scan count
 			"pg_total_relation_size":          true, // Total table size
 			"pg_relation_size":                true, // Table size
