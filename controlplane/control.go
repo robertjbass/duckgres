@@ -898,7 +898,7 @@ func (cp *ControlPlane) handleConnection(conn net.Conn) {
 	}()
 
 	initCtx, initCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	err = server.InitSessionDatabaseMetadata(initCtx, executor, database)
+	err = server.InitSessionDatabaseMetadata(initCtx, executor, database, "")
 	if err != nil {
 		initCancel()
 		slog.Error("Failed to initialize session database metadata.", "user", username, "org", orgID, "database", database, "remote_addr", remoteAddr, "error", err)

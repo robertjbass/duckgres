@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"io"
@@ -336,6 +337,12 @@ type Server struct {
 	fileDBsMu sync.Mutex
 	fileDBs   map[string]*fileDBEntry
 
+	// Per-user lock serializing session metadata init in file mode. The
+	// session metadata SQL rewrites shared views in the pooled instance's
+	// memory catalog; concurrent first-connections (wake-on-connect herds)
+	// would otherwise hit DuckDB catalog write-write conflicts and die.
+	// Keyed by username; entries are never removed (bounded by config users).
+	fileSessionInitMu sync.Map
 
 	// DuckLake checkpoint scheduler
 	checkpointer *DuckLakeCheckpointer
@@ -785,6 +792,12 @@ func openBaseDB(cfg Config, username string) (*sql.DB, error) {
 		if strings.ContainsAny(username, "/\\") || strings.Contains(username, "..") {
 			return nil, fmt.Errorf("invalid username for file persistence: %q (contains path separator or ..)", username)
 		}
+		// The file's catalog is named after its stem (the username). "memory"
+		// would collide with the attached shim catalog; "system" and "temp"
+		// are reserved by DuckDB.
+		if strings.EqualFold(username, "memory") || strings.EqualFold(username, "system") || strings.EqualFold(username, "temp") {
+			return nil, fmt.Errorf("invalid username for file persistence: %q (reserved catalog name)", username)
+		}
 		if err := os.MkdirAll(cfg.DataDir, 0750); err != nil {
 			return nil, fmt.Errorf("failed to create data directory %s: %w", cfg.DataDir, err)
 		}
@@ -989,49 +1002,112 @@ func CreateDBConnection(cfg Config, duckLakeSem chan struct{}, username string, 
 // ConfigureDBConnection initializes an existing DuckDB connection with pg_catalog,
 // information_schema, and DuckLake catalog attachment.
 func ConfigureDBConnection(db *sql.DB, cfg Config, duckLakeSem chan struct{}, username string, serverStartTime time.Time, serverVersion string) error {
+	// In file-persistence mode the instance's default catalog is the user's
+	// database file. The compat shims must NOT be created there: they would
+	// persist into the file and leak into SHOW TABLES / DESCRIBE / exports,
+	// and the transpiler rewrites shim references to memory.main, which does
+	// not resolve against a file catalog ("Binder Error: Catalog \"memory\"
+	// does not exist"). Attach an in-memory catalog named memory and pin one
+	// connection switched to it for the duration of shim init, mirroring the
+	// DuckLake layout where user data and shims live in separate catalogs.
+	// The pool is still capped at one connection here (openBaseDB sets
+	// MaxOpenConns(1); acquireFileDB widens it only after this returns), so
+	// nothing below may call db.* while the pinned connection is held.
+	var target sqlExec = db
+	if cfg.FilePersistence {
+		fileCtx := context.Background()
+		if err := attachMemoryCatalog(fileCtx, db); err != nil {
+			return err
+		}
+		conn, err := db.Conn(fileCtx)
+		if err != nil {
+			return fmt.Errorf("pin connection for shim init: %w", err)
+		}
+		restored := false
+		defer func() {
+			if !restored {
+				// The connection may be stuck on the memory catalog; a later
+				// session picking it up from the pool would silently write
+				// user data into memory. Discard the underlying connection
+				// instead of returning it to the pool.
+				_ = conn.Raw(func(driverConn any) error { return driver.ErrBadConn })
+			}
+			_ = conn.Close()
+		}()
+		if _, err := conn.ExecContext(fileCtx, "USE memory"); err != nil {
+			return fmt.Errorf("switch to memory catalog for shim init: %w", err)
+		}
+		target = connExec{ctx: fileCtx, conn: conn}
+		defer func() {
+			if _, err := conn.ExecContext(fileCtx, "USE "+quoteIdent(username)); err != nil {
+				slog.Warn("Failed to restore file catalog after shim init.",
+					"user", username, "error", err)
+				return
+			}
+			restored = true
+			// The column metadata table persists with the user's data, and
+			// older duckgres versions created the shims inside the file
+			// itself - clean those up now that the authoritative set lives
+			// in the memory catalog.
+			if err := ensureFileColumnMetadataTable(fileCtx, conn); err != nil {
+				slog.Warn("Failed to ensure column metadata table in file catalog.",
+					"user", username, "error", err)
+			}
+			if err := cleanupLegacyFileShims(fileCtx, conn); err != nil {
+				slog.Warn("Failed to clean up legacy shims in file catalog.",
+					"user", username, "error", err)
+			}
+		}()
+	}
+
 	// Initialize pg_catalog schema for PostgreSQL compatibility
 	// Must be done BEFORE attaching DuckLake so macros are created in memory.main,
 	// not in the DuckLake catalog (which doesn't support macro storage).
-	if err := initPgCatalog(db, serverStartTime, processStartTime, serverVersion, processVersion); err != nil {
+	if err := initPgCatalog(target, serverStartTime, processStartTime, serverVersion, processVersion); err != nil {
 		slog.Warn("Failed to initialize pg_catalog.", "user", username, "error", err)
 		// Continue anyway - basic queries will still work
 	}
 
 	// Register ClickHouse SQL macros (chsql compat)
-	initClickHouseMacros(db)
+	initClickHouseMacros(target)
 
-	// Attach DuckLake catalog if configured (but don't set as default yet)
+	// Attach DuckLake catalog if configured (but don't set as default yet).
+	// Skipped entirely in file-persistence mode: the two are mutually
+	// exclusive (file mode pins a pool-of-one connection above, and a
+	// db-level attach here would deadlock against it).
 	duckLakeMode := false
-	if err := AttachDuckLake(db, cfg.DuckLake, duckLakeSem, cfg.DataDir); err != nil {
-		// If DuckLake was explicitly configured, fail the connection.
-		// Silent fallback to local DB causes schema/table mismatches.
-		if cfg.DuckLake.MetadataStore != "" {
-			return fmt.Errorf("DuckLake configured but attachment failed: %w", err)
-		}
-		// DuckLake not configured, this warning is just informational
-		slog.Warn("Failed to attach DuckLake.", "user", username, "error", err)
-	} else if cfg.DuckLake.MetadataStore != "" {
-		duckLakeMode = true
+	if !cfg.FilePersistence {
+		if err := AttachDuckLake(db, cfg.DuckLake, duckLakeSem, cfg.DataDir); err != nil {
+			// If DuckLake was explicitly configured, fail the connection.
+			// Silent fallback to local DB causes schema/table mismatches.
+			if cfg.DuckLake.MetadataStore != "" {
+				return fmt.Errorf("DuckLake configured but attachment failed: %w", err)
+			}
+			// DuckLake not configured, this warning is just informational
+			slog.Warn("Failed to attach DuckLake.", "user", username, "error", err)
+		} else if cfg.DuckLake.MetadataStore != "" {
+			duckLakeMode = true
 
-		// Recreate pg_class_full to source from DuckLake metadata instead of DuckDB's pg_catalog.
-		// This ensures consistent PostgreSQL-compatible OIDs across all pg_class queries.
-		if err := recreatePgClassForDuckLake(db); err != nil {
-			slog.Warn("Failed to recreate pg_class_full for DuckLake.", "error", err)
-			// Non-fatal: continue with DuckDB-based pg_class_full
-		}
+			// Recreate pg_class_full to source from DuckLake metadata instead of DuckDB's pg_catalog.
+			// This ensures consistent PostgreSQL-compatible OIDs across all pg_class queries.
+			if err := recreatePgClassForDuckLake(db); err != nil {
+				slog.Warn("Failed to recreate pg_class_full for DuckLake.", "error", err)
+				// Non-fatal: continue with DuckDB-based pg_class_full
+			}
 
-		// Recreate pg_namespace to source from DuckLake metadata.
-		// This ensures OIDs match pg_class_full for JOINs (e.g., Metabase table discovery).
-		if err := recreatePgNamespaceForDuckLake(db); err != nil {
-			slog.Warn("Failed to recreate pg_namespace for DuckLake.", "error", err)
-			// Non-fatal: continue with DuckDB-based pg_namespace
+			// Recreate pg_namespace to source from DuckLake metadata.
+			// This ensures OIDs match pg_class_full for JOINs (e.g., Metabase table discovery).
+			if err := recreatePgNamespaceForDuckLake(db); err != nil {
+				slog.Warn("Failed to recreate pg_namespace for DuckLake.", "error", err)
+				// Non-fatal: continue with DuckDB-based pg_namespace
+			}
 		}
 	}
 
 	// Initialize information_schema compatibility views in memory.main
 	// Must be done AFTER attaching DuckLake (so views can reference ducklake.information_schema)
 	// but BEFORE setting DuckLake as default (so views are created in memory.main, not ducklake.main)
-	if err := initInformationSchema(db, duckLakeMode); err != nil {
+	if err := initInformationSchema(target, duckLakeMode); err != nil {
 		slog.Warn("Failed to initialize information_schema.", "user", username, "error", err)
 		// Continue anyway - basic queries will still work
 	}

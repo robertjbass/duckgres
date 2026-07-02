@@ -1,7 +1,6 @@
 package server
 
 import (
-	"database/sql"
 	"log/slog"
 )
 
@@ -9,7 +8,7 @@ import (
 // ClickHouse-flavoured queries work out of the box against DuckDB.
 // This is a subset of the chsql community extension's functions, implemented
 // as plain SQL macros following the same pattern as initUtilityMacros.
-func initClickHouseMacros(db *sql.DB) {
+func initClickHouseMacros(db sqlExec) {
 	macros := []string{
 		// -- Type conversion --
 		`CREATE OR REPLACE MACRO toString(x) AS CAST(x AS VARCHAR)`,

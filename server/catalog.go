@@ -13,7 +13,7 @@ import (
 // serverStartTime is the top-level server start time; processStartTime is this process's start time.
 // In standalone mode these are the same; in process isolation mode they differ.
 // serverVersion is the top-level server/control-plane version; processVersion is this process's version.
-func initPgCatalog(db *sql.DB, serverStartTime, processStartTime time.Time, serverVersion, processVersion string) error {
+func initPgCatalog(db sqlExec, serverStartTime, processStartTime time.Time, serverVersion, processVersion string) error {
 	// Create our own pg_database view that has all the columns psql expects
 	// We put it in main schema and rewrite queries to use it
 	// Include template databases for PostgreSQL compatibility
@@ -1075,7 +1075,7 @@ func initPgCatalog(db *sql.DB, serverStartTime, processStartTime time.Time, serv
 // initUtilityMacros creates duckgres-specific utility macros (uptime, version info).
 // These are not PostgreSQL compatibility macros — they're useful for all connections,
 // including passthrough users who bypass pg_catalog initialization.
-func initUtilityMacros(db *sql.DB, serverStartTime, processStartTime time.Time, serverVersion, processVersion string) {
+func initUtilityMacros(db sqlExec, serverStartTime, processStartTime time.Time, serverVersion, processVersion string) {
 	macros := []string{
 		// uptime - returns server uptime in seconds (DOUBLE)
 		// Bakes the server start timestamp into the macro; now() evaluates at query time.
@@ -1113,7 +1113,7 @@ func initUtilityMacros(db *sql.DB, serverStartTime, processStartTime time.Time, 
 // This enables accurate type information (VARCHAR lengths, NUMERIC precision) in information_schema.
 // Views are created in memory.main (before USE ducklake) and query from unqualified information_schema,
 // which resolves to the default catalog's information_schema at query time.
-func initInformationSchema(db *sql.DB, duckLakeMode bool) error {
+func initInformationSchema(db sqlExec, duckLakeMode bool) error {
 	// Use just "information_schema" without catalog prefix
 	// Views are created in memory.main (before USE ducklake) and query from information_schema
 	// which resolves to the current default catalog's information_schema at query time

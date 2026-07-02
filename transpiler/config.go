@@ -7,6 +7,13 @@ type Config struct {
 	// SERIAL types are converted to INTEGER, and DEFAULT now() is stripped.
 	DuckLakeMode bool
 
+	// MacrosInMemoryCatalog indicates the pg_catalog utility macros live in
+	// memory.main rather than the session's default catalog (file-persistence
+	// mode), so calls to them are rewritten with a memory.main prefix.
+	// DuckLakeMode implies the same rewrite on its own; this flag exists for
+	// modes that need the macro rewrite WITHOUT DuckLake's DDL stripping.
+	MacrosInMemoryCatalog bool
+
 	// LogicalDatabaseName is the client-visible database name for the session.
 	// When set in DuckLake mode, three-part references using this catalog are
 	// rewritten to PhysicalCatalogName.

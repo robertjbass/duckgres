@@ -21,6 +21,13 @@ type PgCatalogTransform struct {
 
 	// DuckLakeMode indicates whether we're running with DuckLake attached
 	DuckLakeMode bool
+
+	// MacrosInMemoryCatalog indicates the pg_catalog utility macros live in
+	// memory.main rather than the session's default catalog, so calls to
+	// them must be rewritten with a memory.main prefix. True in DuckLake
+	// mode and in file-persistence mode; in plain in-memory mode the default
+	// catalog IS memory, so unqualified calls already resolve.
+	MacrosInMemoryCatalog bool
 }
 
 // NewPgCatalogTransform creates a new PgCatalogTransform with default mappings.
@@ -33,41 +40,41 @@ func NewPgCatalogTransformWithConfig(duckLakeMode bool) *PgCatalogTransform {
 	return &PgCatalogTransform{
 		DuckLakeMode: duckLakeMode,
 		ViewMappings: map[string]string{
-			"pg_class":              "pg_class_full",
-			"pg_database":           "pg_database",
-			"pg_namespace":          "pg_namespace",
-			"pg_collation":          "pg_collation",
-			"pg_policy":             "pg_policy",
-			"pg_roles":              "pg_roles",
-			"pg_statistic_ext":      "pg_statistic_ext",
-			"pg_publication_tables": "pg_publication_tables",
-			"pg_rules":              "pg_rules",
-			"pg_publication":        "pg_publication",
-			"pg_publication_rel":    "pg_publication_rel",
-			"pg_inherits":           "pg_inherits",
-			"pg_matviews":           "pg_matviews",
-			"pg_stat_user_tables":   "pg_stat_user_tables",
-			"pg_statio_user_tables": "pg_statio_user_tables",
-			"pg_stat_statements":    "pg_stat_statements",
-			"pg_partitioned_table":  "pg_partitioned_table",
-			"pg_type":               "pg_type",
-			"pg_attribute":          "pg_attribute",
-			"pg_constraint":         "pg_constraint",
-			"pg_enum":               "pg_enum",
-			"pg_indexes":            "pg_indexes",
-			"pg_stat_activity":      "pg_stat_activity",
-			"pg_shdescription":          "pg_shdescription",
-			"pg_auth_members":           "pg_auth_members",
-			"pg_opclass":                "pg_opclass",
-			"pg_conversion":             "pg_conversion",
-			"pg_language":               "pg_language",
-			"pg_extension":              "pg_extension",
-			"pg_foreign_server":         "pg_foreign_server",
-			"pg_foreign_data_wrapper":   "pg_foreign_data_wrapper",
-			"pg_foreign_table":          "pg_foreign_table",
-			"pg_trigger":                "pg_trigger",
-			"pg_locks":                  "pg_locks",
-			"pg_rewrite":                "pg_rewrite",
+			"pg_class":                "pg_class_full",
+			"pg_database":             "pg_database",
+			"pg_namespace":            "pg_namespace",
+			"pg_collation":            "pg_collation",
+			"pg_policy":               "pg_policy",
+			"pg_roles":                "pg_roles",
+			"pg_statistic_ext":        "pg_statistic_ext",
+			"pg_publication_tables":   "pg_publication_tables",
+			"pg_rules":                "pg_rules",
+			"pg_publication":          "pg_publication",
+			"pg_publication_rel":      "pg_publication_rel",
+			"pg_inherits":             "pg_inherits",
+			"pg_matviews":             "pg_matviews",
+			"pg_stat_user_tables":     "pg_stat_user_tables",
+			"pg_statio_user_tables":   "pg_statio_user_tables",
+			"pg_stat_statements":      "pg_stat_statements",
+			"pg_partitioned_table":    "pg_partitioned_table",
+			"pg_type":                 "pg_type",
+			"pg_attribute":            "pg_attribute",
+			"pg_constraint":           "pg_constraint",
+			"pg_enum":                 "pg_enum",
+			"pg_indexes":              "pg_indexes",
+			"pg_stat_activity":        "pg_stat_activity",
+			"pg_shdescription":        "pg_shdescription",
+			"pg_auth_members":         "pg_auth_members",
+			"pg_opclass":              "pg_opclass",
+			"pg_conversion":           "pg_conversion",
+			"pg_language":             "pg_language",
+			"pg_extension":            "pg_extension",
+			"pg_foreign_server":       "pg_foreign_server",
+			"pg_foreign_data_wrapper": "pg_foreign_data_wrapper",
+			"pg_foreign_table":        "pg_foreign_table",
+			"pg_trigger":              "pg_trigger",
+			"pg_locks":                "pg_locks",
+			"pg_rewrite":              "pg_rewrite",
 		},
 		Functions: map[string]bool{
 			"pg_get_userbyid":                 true,
@@ -162,31 +169,31 @@ func NewPgCatalogTransformWithConfig(duckLakeMode bool) *PgCatalogTransform {
 			"quote_nullable":                  true, // Quote nullable value
 
 			// ClickHouse SQL macros (server/chsql.go initClickHouseMacros)
-			"tostring":        true,
-			"toint32":         true,
-			"toint64":         true,
-			"tofloat":         true,
-			"toint32ornull":   true,
-			"toint32orzero":   true,
-			"intdiv":          true,
-			"modulo":          true,
-			"empty":           true,
-			"notempty":        true,
-			"splitbychar":     true,
-			"lengthutf8":      true,
-			"toyear":          true,
-			"tomonth":         true,
-			"todayofmonth":    true,
-			"toyyyymmdd":      true,
-			"toyyyymm":        true,
-			"protocol":        true,
-			"domain":          true,
-			"topleveldomain":  true,
-			"ipv4numtostring": true,
+			"tostring":          true,
+			"toint32":           true,
+			"toint64":           true,
+			"tofloat":           true,
+			"toint32ornull":     true,
+			"toint32orzero":     true,
+			"intdiv":            true,
+			"modulo":            true,
+			"empty":             true,
+			"notempty":          true,
+			"splitbychar":       true,
+			"lengthutf8":        true,
+			"toyear":            true,
+			"tomonth":           true,
+			"todayofmonth":      true,
+			"toyyyymmdd":        true,
+			"toyyyymm":          true,
+			"protocol":          true,
+			"domain":            true,
+			"topleveldomain":    true,
+			"ipv4numtostring":   true,
 			"jsonextractstring": true,
-			"jsonhas":         true,
-			"generateuuidv4":  true,
-			"ifnull":          true,
+			"jsonhas":           true,
+			"generateuuidv4":    true,
+			"ifnull":            true,
 		},
 	}
 }
@@ -301,7 +308,7 @@ func (t *PgCatalogTransform) walkAndTransform(node *pg_query.Node, changed *bool
 					if str := first.GetString_(); str != nil && strings.EqualFold(str.Sval, "pg_catalog") {
 						if t.Functions[funcName] {
 							// Check if this is a custom macro that needs memory.main. prefix
-							if t.DuckLakeMode && t.CustomMacros[funcName] {
+							if (t.DuckLakeMode || t.MacrosInMemoryCatalog) && t.CustomMacros[funcName] {
 								// Replace pg_catalog with memory.main
 								n.FuncCall.Funcname[0] = &pg_query.Node{
 									Node: &pg_query.Node_String_{
@@ -323,7 +330,7 @@ func (t *PgCatalogTransform) walkAndTransform(node *pg_query.Node, changed *bool
 						}
 					}
 				}
-			} else if len(n.FuncCall.Funcname) == 1 && t.DuckLakeMode && t.CustomMacros[funcName] {
+			} else if len(n.FuncCall.Funcname) == 1 && (t.DuckLakeMode || t.MacrosInMemoryCatalog) && t.CustomMacros[funcName] {
 				// Unqualified call to a custom macro in DuckLake mode
 				// Add memory.main. prefix
 				n.FuncCall.Funcname = []*pg_query.Node{

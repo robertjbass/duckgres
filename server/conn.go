@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -185,10 +186,14 @@ type clientConn struct {
 // newTranspiler creates a transpiler configured for this connection.
 func (c *clientConn) newTranspiler(convertPlaceholders bool) *transpiler.Transpiler {
 	return transpiler.New(transpiler.Config{
-		DuckLakeMode:        c.server.cfg.DuckLake.MetadataStore != "",
-		LogicalDatabaseName: c.database,
-		PhysicalCatalogName: "ducklake",
-		ConvertPlaceholders: convertPlaceholders,
+		DuckLakeMode: c.server.cfg.DuckLake.MetadataStore != "",
+		// File-persistence mode houses the pg_catalog macros in the attached
+		// memory catalog (never in the user's file), so macro calls need the
+		// memory.main rewrite.
+		MacrosInMemoryCatalog: c.server.cfg.FilePersistence,
+		LogicalDatabaseName:   c.database,
+		PhysicalCatalogName:   "ducklake",
+		ConvertPlaceholders:   convertPlaceholders,
 	})
 }
 
@@ -714,11 +719,31 @@ func (c *clientConn) serve() error {
 	}()
 
 	if !c.passthrough {
+		// In file-persistence mode the session must default to the user's
+		// file catalog (named after the file stem, i.e. the username), not
+		// the memory catalog where the compat shims live. Init is also
+		// serialized per user there: sessions share one DuckDB instance, and
+		// concurrent CREATE OR REPLACE VIEW in its memory catalog raises
+		// catalog write-write conflicts.
+		restoreCatalog := ""
+		var initMu *sync.Mutex
+		if c.server.cfg.FilePersistence {
+			restoreCatalog = c.username
+			muAny, _ := c.server.fileSessionInitMu.LoadOrStore(c.username, &sync.Mutex{})
+			initMu = muAny.(*sync.Mutex)
+		}
 		initCtx, initCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err := InitSessionDatabaseMetadata(initCtx, c.executor, c.database); err != nil {
+		if initMu != nil {
+			initMu.Lock()
+		}
+		initErr := InitSessionDatabaseMetadata(initCtx, c.executor, c.database, restoreCatalog)
+		if initMu != nil {
+			initMu.Unlock()
+		}
+		if initErr != nil {
 			initCancel()
-			c.sendError("FATAL", "XX000", fmt.Sprintf("failed to initialize session database metadata: %v", err))
-			return err
+			c.sendError("FATAL", "XX000", fmt.Sprintf("failed to initialize session database metadata: %v", initErr))
+			return initErr
 		}
 		duckLakeAttached, err := hasAttachedCatalog(initCtx, c.executor, "ducklake")
 		initCancel()

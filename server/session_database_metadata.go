@@ -8,7 +8,13 @@ import (
 
 // InitSessionDatabaseMetadata installs session-local overrides for metadata
 // surfaces that should reflect the client-visible database name on pgwire.
-func InitSessionDatabaseMetadata(ctx context.Context, executor QueryExecutor, database string) error {
+//
+// restoreCatalog names the catalog the session's queries must default to
+// after the metadata overrides are installed in memory.main. Pass the user's
+// file catalog in file-persistence mode; pass "" for in-memory and DuckLake
+// modes (in-memory sessions already default to memory, and the DuckLake path
+// restores its own default below).
+func InitSessionDatabaseMetadata(ctx context.Context, executor QueryExecutor, database, restoreCatalog string) error {
 	if executor == nil {
 		return fmt.Errorf("session executor is required")
 	}
@@ -16,6 +22,15 @@ func InitSessionDatabaseMetadata(ctx context.Context, executor QueryExecutor, da
 	database = strings.TrimSpace(database)
 	if database == "" {
 		return nil
+	}
+
+	// Pooled connections are reused across sessions, so a prior session that
+	// died mid-init could hand us a connection still parked on the memory
+	// catalog. Normalize before touching anything.
+	if restoreCatalog != "" {
+		if _, err := executor.ExecContext(ctx, "USE "+quoteIdent(restoreCatalog)); err != nil {
+			return fmt.Errorf("select session catalog %q: %w", restoreCatalog, err)
+		}
 	}
 
 	if _, err := executor.ExecContext(ctx, fmt.Sprintf(
@@ -42,17 +57,35 @@ func InitSessionDatabaseMetadata(ctx context.Context, executor QueryExecutor, da
 		}
 	}()
 
-	for _, stmt := range buildSessionMetadataSQL(database) {
+	for _, stmt := range buildSessionMetadataSQL(database, restoreCatalog != "") {
 		if _, err := executor.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("apply session metadata override: %w", err)
+		}
+	}
+
+	// File-persistence mode: hand the session back its file catalog as the
+	// default. This must succeed - a session left on the memory catalog
+	// would write user tables into transient memory instead of the file, so
+	// failure is fatal for the session (the caller aborts it), and the USE
+	// at the top of this function re-normalizes the pooled connection for
+	// the next session.
+	//
+	// Deliberately NO memory.main on the search path (unlike the DuckLake
+	// branch above): SHOW TABLES and information_schema union everything on
+	// the search path, which would leak the shims straight back into user
+	// listings. Macro calls resolve via the transpiler's memory.main rewrite
+	// instead (Config.MacrosInMemoryCatalog).
+	if restoreCatalog != "" {
+		if _, err := executor.ExecContext(ctx, "USE "+quoteIdent(restoreCatalog)); err != nil {
+			return fmt.Errorf("restore session catalog %q: %w", restoreCatalog, err)
 		}
 	}
 
 	return nil
 }
 
-func initSessionDatabaseMetadata(ctx context.Context, executor QueryExecutor, database string) error {
-	return InitSessionDatabaseMetadata(ctx, executor, database)
+func initSessionDatabaseMetadata(ctx context.Context, executor QueryExecutor, database, restoreCatalog string) error {
+	return InitSessionDatabaseMetadata(ctx, executor, database, restoreCatalog)
 }
 
 func hasAttachedCatalog(ctx context.Context, executor QueryExecutor, catalog string) (bool, error) {
@@ -107,15 +140,30 @@ func hasAttachedCatalog(ctx context.Context, executor QueryExecutor, catalog str
 	return count > 0, rows.Err()
 }
 
-func buildSessionMetadataSQL(database string) []string {
+func buildSessionMetadataSQL(database string, excludeMemoryCatalog bool) []string {
 	return []string{
 		sessionColumnMetadataTableSQL(),
 		buildSessionPgDatabaseViewSQL(database),
-		buildSessionInformationSchemaColumnsViewSQL(),
-		buildSessionInformationSchemaTablesViewSQL(),
-		buildSessionInformationSchemaSchemataViewSQL(),
-		buildSessionInformationSchemaViewsViewSQL(),
+		buildSessionInformationSchemaColumnsViewSQL(excludeMemoryCatalog),
+		buildSessionInformationSchemaTablesViewSQL(excludeMemoryCatalog),
+		buildSessionInformationSchemaSchemataViewSQL(excludeMemoryCatalog),
+		buildSessionInformationSchemaViewsViewSQL(excludeMemoryCatalog),
 	}
+}
+
+// memoryCatalogFilter returns an AND fragment that hides objects living in
+// the attached memory catalog from an information_schema compat view. In
+// file-persistence mode the memory catalog holds only duckgres's compat
+// shims, never user data, and DuckDB's native information_schema unions all
+// attached catalogs - without this filter the shims (and the memory copy of
+// __duckgres_column_metadata) leak into user-visible schema listings. In
+// in-memory mode the memory catalog IS the user's data, so the filter must
+// stay off.
+func memoryCatalogFilter(excludeMemoryCatalog bool, catalogColumn string) string {
+	if !excludeMemoryCatalog {
+		return ""
+	}
+	return "AND " + catalogColumn + " <> 'memory'"
 }
 
 func sessionColumnMetadataTableSQL() string {
@@ -188,7 +236,7 @@ func buildSessionPgDatabaseViewSQL(database string) string {
 	`, lit, lit, lit, lit, lit, lit, lit)
 }
 
-func buildSessionInformationSchemaColumnsViewSQL() string {
+func buildSessionInformationSchemaColumnsViewSQL(excludeMemoryCatalog bool) string {
 	return `
 		CREATE OR REPLACE VIEW main.information_schema_columns_compat AS
 		SELECT
@@ -271,10 +319,12 @@ func buildSessionInformationSchemaColumnsViewSQL() string {
 			ON c.table_schema = m.table_schema
 			AND c.table_name = m.table_name
 			AND c.column_name = m.column_name
+		WHERE c.table_name <> '__duckgres_column_metadata'
+		` + memoryCatalogFilter(excludeMemoryCatalog, "c.table_catalog") + `
 	`
 }
 
-func buildSessionInformationSchemaTablesViewSQL() string {
+func buildSessionInformationSchemaTablesViewSQL(excludeMemoryCatalog bool) string {
 	return `
 		CREATE OR REPLACE VIEW main.information_schema_tables_compat AS
 		SELECT
@@ -304,10 +354,11 @@ func buildSessionInformationSchemaTablesViewSQL() string {
 		AND t.table_name NOT LIKE 'duckdb_%'
 		AND t.table_name NOT LIKE 'sqlite_%'
 		AND t.table_name NOT LIKE 'pragma_%'
+		` + memoryCatalogFilter(excludeMemoryCatalog, "t.table_catalog") + `
 	`
 }
 
-func buildSessionInformationSchemaSchemataViewSQL() string {
+func buildSessionInformationSchemaSchemataViewSQL(excludeMemoryCatalog bool) string {
 	return `
 		CREATE OR REPLACE VIEW main.information_schema_schemata_compat AS
 		SELECT
@@ -321,6 +372,7 @@ func buildSessionInformationSchemaSchemataViewSQL() string {
 		FROM information_schema.schemata s
 		WHERE s.schema_name NOT IN ('main', 'pg_catalog', 'information_schema')
 		AND s.catalog_name NOT LIKE '__ducklake_metadata_%'
+		` + memoryCatalogFilter(excludeMemoryCatalog, "s.catalog_name") + `
 		UNION ALL
 		SELECT current_database() AS catalog_name, 'public' AS schema_name, 'duckdb' AS schema_owner,
 			NULL, NULL, NULL, NULL
@@ -336,7 +388,7 @@ func buildSessionInformationSchemaSchemataViewSQL() string {
 	`
 }
 
-func buildSessionInformationSchemaViewsViewSQL() string {
+func buildSessionInformationSchemaViewsViewSQL(excludeMemoryCatalog bool) string {
 	return `
 		CREATE OR REPLACE VIEW main.information_schema_views_compat AS
 		SELECT
@@ -363,6 +415,7 @@ func buildSessionInformationSchemaViewsViewSQL() string {
 		AND v.table_name NOT LIKE 'duckdb_%'
 		AND v.table_name NOT LIKE 'sqlite_%'
 		AND v.table_name NOT LIKE 'pragma_%'
+		` + memoryCatalogFilter(excludeMemoryCatalog, "v.table_catalog") + `
 	`
 }
 

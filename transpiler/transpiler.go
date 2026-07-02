@@ -78,7 +78,9 @@ func New(cfg Config) *Transpiler {
 	t.transforms = append(t.transforms, taggedTransform{FlagVersion, transform.NewVersionTransform()})
 
 	// 2. pg_catalog schema and view mappings
-	t.transforms = append(t.transforms, taggedTransform{FlagPgCatalog, transform.NewPgCatalogTransformWithConfig(cfg.DuckLakeMode)})
+	pgCatalogTransform := transform.NewPgCatalogTransformWithConfig(cfg.DuckLakeMode)
+	pgCatalogTransform.MacrosInMemoryCatalog = cfg.MacrosInMemoryCatalog
+	t.transforms = append(t.transforms, taggedTransform{FlagPgCatalog, pgCatalogTransform})
 
 	// 3. information_schema mappings to compat views
 	t.transforms = append(t.transforms, taggedTransform{FlagInfoSchema, transform.NewInformationSchemaTransformWithConfig(cfg.DuckLakeMode)})

@@ -76,6 +76,21 @@ func (t *InformationSchemaTransform) walkAndTransform(node *pg_query.Node, chang
 				*changed = true
 			}
 			// If no mapping, leave as-is (DuckDB will handle it)
+		} else if n.RangeVar != nil && n.RangeVar.Schemaname == "" && n.RangeVar.Catalogname == "" {
+			// Direct unqualified references to the compat views themselves
+			// (e.g. "SELECT ... FROM information_schema_columns_compat").
+			// The views live in memory.main; in file-persistence mode the
+			// session's default catalog is the user's file, so an
+			// unqualified reference would not resolve.
+			relname := strings.ToLower(n.RangeVar.Relname)
+			for _, compatName := range t.ViewMappings {
+				if relname == compatName {
+					n.RangeVar.Catalogname = "memory"
+					n.RangeVar.Schemaname = "main"
+					*changed = true
+					break
+				}
+			}
 		}
 
 	case *pg_query.Node_SelectStmt:
