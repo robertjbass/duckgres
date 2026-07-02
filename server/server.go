@@ -1049,7 +1049,7 @@ func ConfigureDBConnection(db *sql.DB, cfg Config, duckLakeSem chan struct{}, us
 			// older duckgres versions created the shims inside the file
 			// itself - clean those up now that the authoritative set lives
 			// in the memory catalog.
-			if err := ensureFileColumnMetadataTable(fileCtx, conn); err != nil {
+			if err := ensureFileColumnMetadata(fileCtx, conn); err != nil {
 				slog.Warn("Failed to ensure column metadata table in file catalog.",
 					"user", username, "error", err)
 			}

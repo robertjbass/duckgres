@@ -62,8 +62,12 @@ func TestFileModeShimsLiveInMemoryCatalog(t *testing.T) {
 		t.Fatalf("expected pg_database shim in memory.main, got %d", n)
 	}
 	if n := countScalar(t, db,
-		"SELECT COUNT(*) FROM duckdb_tables() WHERE database_name = ? AND table_name = '__duckgres_column_metadata'", user); n != 1 {
-		t.Fatalf("expected column metadata table in the file catalog, got %d", n)
+		"SELECT COUNT(*) FROM duckdb_tables() WHERE database_name = ? AND schema_name = '__duckgres' AND table_name = 'column_metadata'", user); n != 1 {
+		t.Fatalf("expected column metadata table in the file __duckgres schema, got %d", n)
+	}
+	// Plain SHOW TABLES (current schema = main) must be completely clean.
+	if n := countScalar(t, db, "SELECT COUNT(*) FROM (SHOW TABLES)"); n != 0 {
+		t.Fatalf("expected plain SHOW TABLES to list nothing on an empty database, got %d", n)
 	}
 }
 
@@ -86,6 +90,9 @@ func TestFileModeCleansLegacyShims(t *testing.T) {
 		"CREATE MACRO pg_backend_pid() AS 42",
 		"CREATE TABLE user_data (id INTEGER)",
 		"CREATE VIEW user_view AS SELECT 1 AS one",
+		// v0.1.1 metadata table location with a row, to exercise the migration
+		"CREATE TABLE main.__duckgres_column_metadata (table_schema VARCHAR NOT NULL, table_name VARCHAR NOT NULL, column_name VARCHAR NOT NULL, character_maximum_length INTEGER, numeric_precision INTEGER, numeric_scale INTEGER, PRIMARY KEY (table_schema, table_name, column_name))",
+		"INSERT INTO main.__duckgres_column_metadata VALUES ('public', 'user_data', 'name', 50, NULL, NULL)",
 	} {
 		if _, err := seed.Exec(stmt); err != nil {
 			t.Fatalf("seed %q: %v", stmt, err)
@@ -115,6 +122,19 @@ func TestFileModeCleansLegacyShims(t *testing.T) {
 	if n := countScalar(t, db,
 		"SELECT COUNT(*) FROM duckdb_views() WHERE database_name = ? AND view_name = 'user_view'", user); n != 1 {
 		t.Fatalf("expected user view with non-shim name to survive cleanup")
+	}
+	// v0.1.1 metadata table migrated into __duckgres and dropped from main.
+	if n := countScalar(t, db,
+		"SELECT COUNT(*) FROM duckdb_tables() WHERE database_name = ? AND schema_name = 'main' AND table_name = '__duckgres_column_metadata'", user); n != 0 {
+		t.Fatalf("expected legacy metadata table to be dropped from main")
+	}
+	if n := countScalar(t, db,
+		"SELECT COUNT(*) FROM __duckgres.column_metadata WHERE table_name = 'user_data' AND character_maximum_length = 50"); n != 1 {
+		t.Fatalf("expected legacy metadata row to be migrated")
+	}
+	// SHOW TABLES shows only the user's table after cleanup + migration.
+	if n := countScalar(t, db, "SELECT COUNT(*) FROM (SHOW TABLES)"); n != 2 {
+		t.Fatalf("expected SHOW TABLES to list user_data and user_view only, got %d", n)
 	}
 }
 

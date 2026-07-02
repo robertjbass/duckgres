@@ -50,15 +50,55 @@ func attachMemoryCatalog(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-// ensureFileColumnMetadataTable creates __duckgres_column_metadata in the
-// user's file catalog. Unlike the shims, this table stores column type
-// metadata (varchar lengths, numeric precision/scale) that DuckDB does not
-// preserve, so it must persist with the user's data across restarts. The
-// compat views reference it as main.__duckgres_column_metadata, which
-// resolves through the session search path to the file catalog first.
-func ensureFileColumnMetadataTable(ctx context.Context, conn *sql.Conn) error {
-	_, err := conn.ExecContext(ctx, sessionColumnMetadataTableSQL())
-	return err
+// ensureFileColumnMetadata creates the __duckgres schema and its
+// column_metadata table in the user's file catalog. Unlike the shims, this
+// table stores column type metadata (varchar lengths, numeric
+// precision/scale) that DuckDB does not preserve, so it must persist with
+// the user's data across restarts. It lives in a dedicated __duckgres
+// schema (NOT main) so plain SHOW TABLES / DESCRIBE never surface it; the
+// session compat views reference it catalog-qualified.
+//
+// Also migrates the v0.1.1 location (main.__duckgres_column_metadata) into
+// the new schema and drops the old table, so upgraded files stop showing it
+// in listings.
+func ensureFileColumnMetadata(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, "CREATE SCHEMA IF NOT EXISTS __duckgres"); err != nil {
+		return fmt.Errorf("create __duckgres schema: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS __duckgres.column_metadata (
+			table_schema VARCHAR NOT NULL,
+			table_name VARCHAR NOT NULL,
+			column_name VARCHAR NOT NULL,
+			character_maximum_length INTEGER,
+			numeric_precision INTEGER,
+			numeric_scale INTEGER,
+			PRIMARY KEY (table_schema, table_name, column_name)
+		)`); err != nil {
+		return fmt.Errorf("create column metadata table: %w", err)
+	}
+
+	var legacy int
+	if err := conn.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM duckdb_tables()
+		WHERE database_name = current_database() AND schema_name = 'main'
+		AND table_name = '__duckgres_column_metadata'`).Scan(&legacy); err != nil {
+		return fmt.Errorf("check legacy metadata table: %w", err)
+	}
+	if legacy == 0 {
+		return nil
+	}
+	if _, err := conn.ExecContext(ctx, `
+		INSERT INTO __duckgres.column_metadata
+		SELECT * FROM main.__duckgres_column_metadata
+		ON CONFLICT DO NOTHING`); err != nil {
+		return fmt.Errorf("migrate legacy metadata rows: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, "DROP TABLE main.__duckgres_column_metadata"); err != nil {
+		return fmt.Errorf("drop legacy metadata table: %w", err)
+	}
+	slog.Info("Migrated column metadata table into __duckgres schema.")
+	return nil
 }
 
 // cleanupLegacyFileShims drops compat shim views and macros that older
@@ -66,7 +106,7 @@ func ensureFileColumnMetadataTable(ctx context.Context, conn *sql.Conn) error {
 // created while the file was the default catalog). The authoritative shim
 // inventory is whatever THIS version just created in memory.main: any object
 // in the file's main schema with a matching name is legacy pollution, not
-// user data. The __duckgres_column_metadata table is intentionally not
+// user data. The __duckgres.column_metadata table is intentionally not
 // touched (it is a table, and it belongs in the file).
 //
 // Caveat: a user view or macro that happens to share a shim name (e.g. a

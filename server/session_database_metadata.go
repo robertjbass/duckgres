@@ -57,7 +57,7 @@ func InitSessionDatabaseMetadata(ctx context.Context, executor QueryExecutor, da
 		}
 	}()
 
-	for _, stmt := range buildSessionMetadataSQL(database, restoreCatalog != "") {
+	for _, stmt := range buildSessionMetadataSQL(database, restoreCatalog) {
 		if _, err := executor.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("apply session metadata override: %w", err)
 		}
@@ -140,15 +140,30 @@ func hasAttachedCatalog(ctx context.Context, executor QueryExecutor, catalog str
 	return count > 0, rows.Err()
 }
 
-func buildSessionMetadataSQL(database string, excludeMemoryCatalog bool) []string {
-	return []string{
-		sessionColumnMetadataTableSQL(),
-		buildSessionPgDatabaseViewSQL(database),
-		buildSessionInformationSchemaColumnsViewSQL(excludeMemoryCatalog),
-		buildSessionInformationSchemaTablesViewSQL(excludeMemoryCatalog),
-		buildSessionInformationSchemaSchemataViewSQL(excludeMemoryCatalog),
-		buildSessionInformationSchemaViewsViewSQL(excludeMemoryCatalog),
+// buildSessionMetadataSQL returns the session override statements.
+// fileCatalog names the user's file catalog in file-persistence mode and is
+// empty in in-memory/DuckLake modes. In file mode the column metadata table
+// lives at <fileCatalog>.__duckgres.column_metadata (created during
+// ConfigureDBConnection), so no session-side table creation is needed and
+// the columns view references it catalog-qualified; in the other modes the
+// table is created in memory.main as before.
+func buildSessionMetadataSQL(database, fileCatalog string) []string {
+	fileMode := fileCatalog != ""
+	metadataTableRef := "main.__duckgres_column_metadata"
+	if fileMode {
+		metadataTableRef = quoteIdent(fileCatalog) + ".__duckgres.column_metadata"
 	}
+	stmts := []string{}
+	if !fileMode {
+		stmts = append(stmts, sessionColumnMetadataTableSQL())
+	}
+	return append(stmts,
+		buildSessionPgDatabaseViewSQL(database),
+		buildSessionInformationSchemaColumnsViewSQL(fileMode, metadataTableRef),
+		buildSessionInformationSchemaTablesViewSQL(fileMode),
+		buildSessionInformationSchemaSchemataViewSQL(fileMode),
+		buildSessionInformationSchemaViewsViewSQL(fileMode),
+	)
 }
 
 // memoryCatalogFilter returns an AND fragment that hides objects living in
@@ -236,7 +251,7 @@ func buildSessionPgDatabaseViewSQL(database string) string {
 	`, lit, lit, lit, lit, lit, lit, lit)
 }
 
-func buildSessionInformationSchemaColumnsViewSQL(excludeMemoryCatalog bool) string {
+func buildSessionInformationSchemaColumnsViewSQL(excludeMemoryCatalog bool, metadataTableRef string) string {
 	return `
 		CREATE OR REPLACE VIEW main.information_schema_columns_compat AS
 		SELECT
@@ -315,11 +330,12 @@ func buildSessionInformationSchemaColumnsViewSQL(excludeMemoryCatalog bool) stri
 			NULL AS generation_expression,
 			'YES' AS is_updatable
 		FROM information_schema.columns c
-		LEFT JOIN main.__duckgres_column_metadata m
+		LEFT JOIN ` + metadataTableRef + ` m
 			ON c.table_schema = m.table_schema
 			AND c.table_name = m.table_name
 			AND c.column_name = m.column_name
 		WHERE c.table_name <> '__duckgres_column_metadata'
+		AND c.table_schema <> '__duckgres'
 		` + memoryCatalogFilter(excludeMemoryCatalog, "c.table_catalog") + `
 	`
 }
@@ -354,6 +370,7 @@ func buildSessionInformationSchemaTablesViewSQL(excludeMemoryCatalog bool) strin
 		AND t.table_name NOT LIKE 'duckdb_%'
 		AND t.table_name NOT LIKE 'sqlite_%'
 		AND t.table_name NOT LIKE 'pragma_%'
+		AND t.table_schema <> '__duckgres'
 		` + memoryCatalogFilter(excludeMemoryCatalog, "t.table_catalog") + `
 	`
 }
@@ -370,7 +387,7 @@ func buildSessionInformationSchemaSchemataViewSQL(excludeMemoryCatalog bool) str
 			NULL AS default_character_set_name,
 			NULL AS sql_path
 		FROM information_schema.schemata s
-		WHERE s.schema_name NOT IN ('main', 'pg_catalog', 'information_schema')
+		WHERE s.schema_name NOT IN ('main', 'pg_catalog', 'information_schema', '__duckgres')
 		AND s.catalog_name NOT LIKE '__ducklake_metadata_%'
 		` + memoryCatalogFilter(excludeMemoryCatalog, "s.catalog_name") + `
 		UNION ALL
@@ -415,6 +432,7 @@ func buildSessionInformationSchemaViewsViewSQL(excludeMemoryCatalog bool) string
 		AND v.table_name NOT LIKE 'duckdb_%'
 		AND v.table_name NOT LIKE 'sqlite_%'
 		AND v.table_name NOT LIKE 'pragma_%'
+		AND v.table_schema <> '__duckgres'
 		` + memoryCatalogFilter(excludeMemoryCatalog, "v.table_catalog") + `
 	`
 }
