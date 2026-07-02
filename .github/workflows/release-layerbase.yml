@@ -1,0 +1,52 @@
+name: Layerbase Release
+
+# Builds and publishes a Layerbase release when a v*-layerbase tag is pushed
+# (works from any branch - the workflow runs at the tagged commit). Kept
+# separate from release.yml so upstream merges never conflict with it.
+# The linux-amd64 asset name and download URL are consumed by
+# layerbase-cloud/images/Dockerfile.base via DUCKGRES_VERSION.
+
+on:
+  push:
+    tags:
+      - "v*-layerbase"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build linux-amd64
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          go build -ldflags "-X main.version=${GITHUB_REF_NAME} -X main.commit=${{ github.sha }} -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o duckgres-linux-amd64 .
+
+      - name: Generate checksums
+        run: sha256sum duckgres-linux-amd64 > checksums.txt
+
+      - name: Create release
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          make_latest: false
+          body: |
+            Layerbase release ${{ github.ref_name }} from the file-persistence fork.
+
+            The duckgres-linux-amd64 asset is consumed by layerbase-cloud
+            images/Dockerfile.base (DUCKGRES_VERSION).
+          files: |
+            duckgres-linux-amd64
+            checksums.txt
