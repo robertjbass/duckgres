@@ -1248,6 +1248,12 @@ func (c *clientConn) handleQuery(body []byte) error {
 		if execResult != nil {
 			writtenRows, _ = execResult.RowsAffected()
 		}
+		// Persist VARCHAR/CHAR lengths so information_schema reports them
+		// (DuckDB drops the length modifier). Best-effort, non-passthrough,
+		// only for CREATE TABLE - never touches the hot DML path.
+		if cmdType == "CREATE TABLE" {
+			c.captureColumnMetadata(originalQuery)
+		}
 		c.updateTxStatus(cmdType)
 		tag := c.buildCommandTag(cmdType, execResult)
 		_ = writeCommandComplete(c.writer, tag)
@@ -1541,6 +1547,11 @@ func (c *clientConn) handleMultiStatementQuery(tree *pg_query.ParseResult) error
 		}
 		if errSent {
 			break // Stop processing remaining statements on error
+		}
+		// Capture VARCHAR/CHAR lengths for a CREATE TABLE in the batch (the
+		// single-statement path handles the non-batch case). Best-effort.
+		if !c.passthrough && stmt.GetStmt().GetCreateStmt() != nil {
+			c.captureColumnMetadata(singleSQL)
 		}
 	}
 
