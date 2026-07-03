@@ -91,7 +91,10 @@ func initPgCatalog(db sqlExec, serverStartTime, processStartTime time.Time, serv
 			relfrozenxid,
 			relminmxid,
 			relacl,
-			reloptions,
+			-- reloptions is NULL in DuckDB's pg_class; psql's \d+ does
+			-- unnest(reloptions), which errors on NULL. Coerce to an empty
+			-- text array so table-detail introspection works.
+			COALESCE(reloptions, []::VARCHAR[]) AS reloptions,
 			relpartbound
 		FROM pg_catalog.pg_class
 		WHERE relname NOT IN (
@@ -102,6 +105,11 @@ func initPgCatalog(db sqlExec, serverStartTime, processStartTime time.Time, serv
 			'pg_partitioned_table', 'pg_rewrite', 'pg_type', 'pg_attribute',
 			'information_schema_columns_compat', 'information_schema_tables_compat',
 			'information_schema_schemata_compat', '__duckgres_column_metadata'
+		)
+		-- Hide duckgres's own internal schema (holds column_metadata) from
+		-- table listings (psql \dt, GUI table browsers).
+		AND relnamespace NOT IN (
+			SELECT oid FROM pg_catalog.pg_namespace WHERE nspname = '__duckgres'
 		)
 	`
 	if _, err := db.Exec(pgClassSQL); err != nil {
@@ -238,11 +246,29 @@ func initPgCatalog(db sqlExec, serverStartTime, processStartTime time.Time, serv
 		SELECT
 			0::BIGINT AS oid,
 			0::BIGINT AS prpubid,
-			0::BIGINT AS prrelid
+			0::BIGINT AS prrelid,
+			-- PG15+ columns psql's \d binds (row filter + column list). The
+			-- view is empty, but the columns must exist for the query to bind.
+			NULL::VARCHAR AS prqual,
+			NULL::SMALLINT[] AS prattrs
 		WHERE false
 	`
 	if _, err := db.Exec(pgPublicationRelSQL); err != nil {
 		slog.Warn("Failed to create pg_publication_rel view.", "error", err)
+	}
+
+	// pg_publication_namespace (PG15+): schema-level publication membership.
+	// psql's \d joins it. DuckDB has no publications - empty stub.
+	pgPublicationNamespaceSQL := `
+		CREATE OR REPLACE VIEW pg_publication_namespace AS
+		SELECT
+			0::BIGINT AS oid,
+			0::BIGINT AS pnpubid,
+			0::BIGINT AS pnnspid
+		WHERE false
+	`
+	if _, err := db.Exec(pgPublicationNamespaceSQL); err != nil {
+		slog.Warn("Failed to create pg_publication_namespace view.", "error", err)
 	}
 
 	// Create pg_inherits view (table inheritance, empty - DuckDB doesn't support inheritance)
@@ -456,6 +482,7 @@ func initPgCatalog(db sqlExec, serverStartTime, processStartTime time.Time, serv
 			CASE WHEN nspname = 'main' THEN 6171::BIGINT ELSE 10::BIGINT END AS nspowner,
 			nspacl
 		FROM pg_catalog.pg_namespace
+		WHERE nspname <> '__duckgres'
 	`
 	if _, err := db.Exec(pgNamespaceSQL); err != nil {
 		slog.Warn("Failed to create pg_namespace view.", "error", err)
@@ -1008,8 +1035,10 @@ func initPgCatalog(db sqlExec, serverStartTime, processStartTime time.Time, serv
 		// pg_partition_ancestors - PG returns the relation plus its partition
 		// ancestors; DuckDB has no declarative partitioning, so the correct
 		// answer is always just the relation itself. psql \d queries this on
-		// every table since PG12.
-		`CREATE OR REPLACE MACRO pg_partition_ancestors(rel) AS rel`,
+		// every table since PG12, UNION ALL'd with a regclass OID, so return
+		// the arg as a BIGINT OID (not VARCHAR) or the IN-list comparison fails
+		// "Cannot compare BIGINT and VARCHAR".
+		`CREATE OR REPLACE MACRO pg_partition_ancestors(rel) AS CAST(rel AS BIGINT)`,
 
 		// pg_total_relation_size - total disk space used by table (stub, returns 0)
 		`CREATE OR REPLACE MACRO pg_total_relation_size(rel) AS 0`,

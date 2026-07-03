@@ -274,6 +274,13 @@ func (t *TypeCastTransform) walkSelectStmt(stmt *pg_query.SelectStmt, changed *b
 	for _, from := range stmt.FromClause {
 		t.walkAndTransform(from, changed)
 	}
+	// VALUES (...) rows carry casts too - e.g. psql's \d sends
+	// `VALUES ('123'::pg_catalog.regclass)` inside a UNION. Without this the
+	// cast reaches DuckDB unrewritten ("Type with name regclass does not
+	// exist").
+	for _, vlist := range stmt.ValuesLists {
+		t.walkAndTransform(vlist, changed)
+	}
 	t.walkAndTransform(stmt.WhereClause, changed)
 	for _, group := range stmt.GroupClause {
 		t.walkAndTransform(group, changed)

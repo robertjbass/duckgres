@@ -672,6 +672,15 @@ func TestTranspile_TypeCast(t *testing.T) {
 			excludes: "",
 		},
 		{
+			// psql's \d sends `VALUES ('123'::pg_catalog.regclass)` inside a
+			// UNION; the cast must be rewritten even when it lives in a VALUES
+			// list, or DuckDB errors "Type with name regclass does not exist".
+			name:     "regclass cast inside a VALUES list is rewritten",
+			input:    "SELECT 1 WHERE 2 IN (SELECT 3 UNION ALL VALUES ('users'::pg_catalog.regclass))",
+			contains: "select oid from",
+			excludes: "regclass",
+		},
+		{
 			name:     "regclass cast from qualified column ref - fallback to varchar",
 			input:    "SELECT a.attrelid::regclass FROM pg_attribute a",
 			contains: "varchar",             // Now falls back (conservative - no type info)
