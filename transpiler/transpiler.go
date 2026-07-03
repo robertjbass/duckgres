@@ -31,6 +31,7 @@ const (
 	FlagOnConflict                                   // ON CONFLICT handling
 	FlagLocking                                      // FOR UPDATE/SHARE removal
 	FlagCtid                                         // ctid -> rowid mapping
+	FlagSrfAlias                                     // set-returning-function alias column naming
 	FlagDDL                                          // DDL constraint stripping
 	FlagPlaceholder                                  // $1/$2 placeholder conversion
 	flagSentinel                                     // must be last — used to derive FlagAll
@@ -123,6 +124,10 @@ func New(cfg Config) *Transpiler {
 
 	// 14. ctid → rowid mapping (PostgreSQL system column to DuckDB equivalent)
 	t.transforms = append(t.transforms, taggedTransform{FlagCtid, transform.NewCtidTransform()})
+
+	// Name single-column SRF output columns after their FROM alias (PG parity),
+	// so psql's \d can reference `generate_series(...) s` as a scalar `s`.
+	t.transforms = append(t.transforms, taggedTransform{FlagSrfAlias, transform.NewSrfAliasTransform()})
 
 	// DDL transforms only when DuckLake mode is enabled
 	if cfg.DuckLakeMode {
@@ -332,6 +337,13 @@ func Classify(sql string, cfg Config) Classification {
 	// information_schema references
 	if strings.Contains(upper, "INFORMATION_SCHEMA") {
 		flags |= FlagInfoSchema
+	}
+
+	// Single-column set-returning functions in a FROM alias need column-name
+	// normalization (PG names the column after the alias; DuckDB after the fn).
+	if containsAny(upper, "GENERATE_SERIES(", "GENERATE_SUBSCRIPTS(", "UNNEST(",
+		"REGEXP_SPLIT_TO_TABLE(", "JSON_ARRAY_ELEMENTS", "JSONB_ARRAY_ELEMENTS") {
+		flags |= FlagSrfAlias
 	}
 
 	// public.table references (but not catalog.public.table which is 3-part)
