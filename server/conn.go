@@ -2873,11 +2873,11 @@ func (c *clientConn) getCommandType(upperQuery string) string {
 		return "ALTER TABLE"
 	case strings.HasPrefix(upperQuery, "TRUNCATE"):
 		return "TRUNCATE TABLE"
-	case strings.HasPrefix(upperQuery, "BEGIN"):
+	case strings.HasPrefix(upperQuery, "BEGIN"), strings.HasPrefix(upperQuery, "START TRANSACTION"):
 		return "BEGIN"
-	case strings.HasPrefix(upperQuery, "COMMIT"):
+	case strings.HasPrefix(upperQuery, "COMMIT"), upperQuery == "END", strings.HasPrefix(upperQuery, "END;"), strings.HasPrefix(upperQuery, "END "):
 		return "COMMIT"
-	case strings.HasPrefix(upperQuery, "ROLLBACK"):
+	case strings.HasPrefix(upperQuery, "ROLLBACK"), upperQuery == "ABORT", strings.HasPrefix(upperQuery, "ABORT;"), strings.HasPrefix(upperQuery, "ABORT "):
 		return "ROLLBACK"
 	case strings.HasPrefix(upperQuery, "SET"):
 		return "SET"
@@ -3842,6 +3842,9 @@ func splitQualifiedName(name string) []string {
 	return parts
 }
 
+// errAppenderUnavailable permits a fallback only before an appender could write.
+var errAppenderUnavailable = errors.New("appender unavailable")
+
 // appendWithDuckDBAppender uses the DuckDB Appender API for fast bulk inserts.
 // Only works for full-column inserts (no column subset).
 func (c *clientConn) appendWithDuckDBAppender(tableName string, rows [][]interface{}) (int, error) {
@@ -3850,11 +3853,12 @@ func (c *clientConn) appendWithDuckDBAppender(tableName string, rows [][]interfa
 	ctx := context.Background()
 	sqlConn, err := c.executor.ConnContext(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("failed to get DB connection: %w", err)
+		return 0, fmt.Errorf("%w: failed to get DB connection: %w", errAppenderUnavailable, err)
 	}
 	defer sqlConn.Close() //nolint:errcheck
 
 	var rowCount int
+	started := false
 	err = sqlConn.Raw(func(driverConn interface{}) error {
 		dc, ok := driverConn.(driver.Conn)
 		if !ok {
@@ -3875,6 +3879,7 @@ func (c *clientConn) appendWithDuckDBAppender(tableName string, rows [][]interfa
 			return fmt.Errorf("failed to create Appender: %w", appErr)
 		}
 
+		started = true
 		for i, row := range rows {
 			driverVals := make([]driver.Value, len(row))
 			for j, v := range row {
@@ -3894,6 +3899,9 @@ func (c *clientConn) appendWithDuckDBAppender(tableName string, rows [][]interfa
 		return nil
 	})
 
+	if err != nil && !started {
+		return 0, fmt.Errorf("%w: %w", errAppenderUnavailable, err)
+	}
 	return rowCount, err
 }
 
@@ -4021,17 +4029,59 @@ func (c *clientConn) parseBinaryCopyAndInsert(data []byte, tableName, columnList
 		return 0, nil
 	}
 
-	// Fast path: use Appender for full-column inserts (no column subset)
-	if columnList == "" {
-		count, err := c.appendWithDuckDBAppender(tableName, rows)
-		if err == nil {
-			return count, nil
+	return c.insertBinaryCopyRows(tableName, columnList, cols, rows)
+}
+
+// insertBinaryCopyRows makes all appender flushes or INSERT batches one statement.
+// An explicit client transaction retains ownership of its commit and rollback.
+func (c *clientConn) insertBinaryCopyRows(tableName, columnList string, cols []string, rows [][]interface{}) (count int, err error) {
+	ownTransaction := c.txStatus != txStatusTransaction && c.txStatus != txStatusError
+	if ownTransaction {
+		if _, err = c.executor.Exec("BEGIN"); err != nil {
+			return 0, fmt.Errorf("begin binary COPY: %w", err)
 		}
-		slog.Warn("Appender failed, falling back to batched INSERT.", "table", tableName, "error", err)
+		defer func() {
+			if err != nil {
+				_, rollbackErr := c.executor.Exec("ROLLBACK")
+				err = errors.Join(err, rollbackErr)
+			}
+		}()
 	}
 
-	// Fallback: batched multi-row INSERT
-	return c.batchInsertRows(tableName, columnList, cols, rows)
+	// Once appending starts, an error may follow successful internal flushes.
+	// Retrying all rows would duplicate writes or hide the original failure.
+	if columnList == "" && binaryRowsSupportAppender(rows) {
+		count, err = c.appendWithDuckDBAppender(tableName, rows)
+		if errors.Is(err, errAppenderUnavailable) {
+			count, err = c.batchInsertRows(tableName, columnList, cols, rows)
+		}
+	} else {
+		count, err = c.batchInsertRows(tableName, columnList, cols, rows)
+	}
+	if err != nil {
+		return 0, err
+	}
+	if ownTransaction {
+		if _, err = c.executor.Exec("COMMIT"); err != nil {
+			return 0, fmt.Errorf("commit binary COPY: %w", err)
+		}
+	}
+	return count, nil
+}
+
+// binaryRowsSupportAppender leaves string coercion to DuckDB SQL. The binary
+// decoder also represents NUMERIC, TIME, INTERVAL, UUID and ENUM values as strings;
+// Go appender setters cannot safely coerce all of them. Choose before any writes,
+// including when NULL rows precede the first non-NULL value.
+func binaryRowsSupportAppender(rows [][]interface{}) bool {
+	for _, row := range rows {
+		for _, value := range row {
+			if _, needsSQLConversion := value.(string); needsSQLConversion {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // decodeBinaryCopy decodes a binary COPY field, using field length to resolve type ambiguity.
