@@ -807,3 +807,61 @@ Duckgres implements a subset of PostgreSQL's system catalog to satisfy introspec
 ## License
 
 MIT
+
+## Layerbase exact DuckDB runtime qualification
+
+The proposed `v0.1.6-layerbase` candidate is based on `v0.1.5-layerbase` and embeds DuckDB
+**1.5.6** through the official stable `duckdb-go/v2 v2.10506.0` and
+`duckdb-go-bindings v0.10506.0` modules. The Go driver module's major version
+is not the embedded DuckDB version.
+
+Run `just test-embedded-version` to check the embedded library and an actual
+TLS PostgreSQL connection, commit a row, restart the proxy against the same
+persistent directory, and verify both the exact version and row. The recipe
+accepts an exact expected library version, for example
+`just test-embedded-version v1.5.6`. Use
+`SELECT library_version FROM pragma_version()` to inspect a running proxy;
+`SELECT version()` intentionally advertises PostgreSQL compatibility.
+
+`just test-appender-contract` checks that a failed automatic appender flush
+remains visible on close. Standalone binary COPY uses the appender API.
+
+Do not relabel this artifact as DuckDB 2.0 or replace an existing database's
+runtime pin with it. Keep older proxy binaries available under their original
+versioned artifact identifiers. A deployment rollback must select the matching
+runtime for each database and must not open a newer data file with an older
+runtime merely because the API or image was rolled back.
+
+These local checks do not qualify Cloud API lifecycle operations, moves,
+retained backups, or staging image replacement. Those remain Cloud release gates.
+
+### DuckDB 2.0 gate (2026-10-21)
+
+Official bindings `v0.20000.0` contain stable DuckDB 2.0.0. Pairing them with
+the latest stable driver, `v2.10506.0`, passes the exact SQL-version and
+persistent-reopen test, but fails `test-appender-contract`: one `AppendRow`
+fails during automatic flush, then `Close` returns nil. The stable 1.5.6
+pairing passes the same contract test. This is a driver qualification failure,
+not evidence that every Cloud COPY request silently succeeds: Duckgres checks
+`AppendRow` errors immediately before its existing fallback path.
+
+The official compatibility fixes are in
+[duckdb-go PR 217](https://github.com/duckdb/duckdb-go/pull/217), open at
+`a25c5598b54c8683bd91c75fdde4559e04e33cb5` when checked. Wait for and qualify a
+stable tagged driver containing those fixes; do not ship the unmerged PR or
+reinterpret a successful version query as full compatibility.
+
+To reproduce the isolated probe without changing the candidate's dependency
+pins, copy `go.mod` and `go.sum` to a temporary `.mod`/`.sum` pair, run
+`go mod edit -modfile=<temporary.mod> -require=github.com/duckdb/duckdb-go-bindings@v0.20000.0`,
+and set `GOFLAGS="-modfile=<temporary.mod> -mod=mod"` for
+`just test-embedded-version v2.0.0` and `just test-appender-contract`.
+
+The `DuckDB runtime candidate` workflow qualifies native Linux amd64 and arm64
+and uploads binaries with SHA-256 files to Actions artifacts. It has read-only
+repository permissions and creates no release or image tag. Before publishing
+`v0.1.6-layerbase`, verify both jobs and their exact source commit, combine the
+two checksum entries, and publish those identical bytes under a new immutable
+release. Preserve `v0.1.5-layerbase` and every older retained artifact. Publication
+and Cloud rollout are separate approvals; passing this workflow does not authorize
+changing any database's runtime pin.

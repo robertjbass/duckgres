@@ -398,3 +398,13 @@ seed-ducklake:
 [group('scripts')]
 bootstrap-ducklake:
     ./scripts/bootstrap_ducklake_frozen_dataset.sh
+
+# Qualify the exact embedded library without optional DuckLake services.
+[group('test')]
+test-embedded-version expected="v1.5.6":
+    DUCKGRES_EXPECTED_DUCKDB_VERSION={{expected}} go test -v -count=1 -p 1 ./server -run '^Test(EmbeddedDuckDBVersion|DuckDBProxyVersionAndPersistentReopen)$'
+
+# Validate driver error reporting used by binary COPY.
+[group('test')]
+test-appender-contract:
+    go test -v -count=1 -p 1 ./server -run '^TestDuckDBAppenderRetainsAutomaticFlushFailure$'
