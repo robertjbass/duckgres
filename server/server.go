@@ -175,6 +175,7 @@ type Config struct {
 
 	// Extensions to load on database initialization
 	Extensions []string
+	Sources    []SourceConfig
 
 	// DuckLake configuration
 	DuckLake DuckLakeConfig
@@ -1002,6 +1003,9 @@ func CreateDBConnection(cfg Config, duckLakeSem chan struct{}, username string, 
 // ConfigureDBConnection initializes an existing DuckDB connection with pg_catalog,
 // information_schema, and DuckLake catalog attachment.
 func ConfigureDBConnection(db *sql.DB, cfg Config, duckLakeSem chan struct{}, username string, serverStartTime time.Time, serverVersion string) error {
+	if err := AttachSources(db, cfg.Sources); err != nil {
+		return err
+	}
 	// In file-persistence mode the instance's default catalog is the user's
 	// database file. The compat shims must NOT be created there: they would
 	// persist into the file and leak into SHOW TABLES / DESCRIBE / exports,
@@ -1159,6 +1163,11 @@ func CreatePassthroughDBConnection(cfg Config, duckLakeSem chan struct{}, userna
 		return nil, err
 	}
 
+	if err := AttachSources(db, cfg.Sources); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+
 	// Utility macros (uptime, version) are useful for all connections.
 	initUtilityMacros(db, serverStartTime, processStartTime, serverVersion, processVersion)
 
@@ -1292,7 +1301,7 @@ func AttachDuckLake(db *sql.DB, dlCfg DuckLakeConfig, sem chan struct{}, dataDir
 
 		if needsSecret {
 			if err := createS3Secret(db, dlCfg); err != nil {
-				return fmt.Errorf("failed to create S3 secret: %w", err)
+				return fmt.Errorf("failed to create S3 secret")
 			}
 		}
 	}
@@ -1335,7 +1344,7 @@ func AttachDuckLake(db *sql.DB, dlCfg DuckLakeConfig, sem chan struct{}, dataDir
 		return err
 	}); err != nil {
 		attachSpan.End()
-		return fmt.Errorf("failed to attach DuckLake: %w", err)
+		return fmt.Errorf("failed to attach DuckLake catalog")
 	}
 	attachSpan.End()
 
@@ -1577,20 +1586,20 @@ func buildConfigSecret(dlCfg DuckLakeConfig) string {
 			REGION '%s',
 			URL_STYLE '%s',
 			USE_SSL %s`,
-		dlCfg.S3AccessKey,
-		dlCfg.S3SecretKey,
-		region,
-		urlStyle,
+		escapeSQLStringLiteral(dlCfg.S3AccessKey),
+		escapeSQLStringLiteral(dlCfg.S3SecretKey),
+		escapeSQLStringLiteral(region),
+		escapeSQLStringLiteral(urlStyle),
 		useSSL,
 	)
 
 	// Add endpoint if specified (for MinIO or custom S3-compatible storage)
 	if dlCfg.S3Endpoint != "" {
-		secret += fmt.Sprintf(",\n\t\t\tENDPOINT '%s'", dlCfg.S3Endpoint)
+		secret += fmt.Sprintf(",\n\t\t\tENDPOINT '%s'", escapeSQLStringLiteral(dlCfg.S3Endpoint))
 	}
 
 	if dlCfg.S3SessionToken != "" {
-		secret += fmt.Sprintf(",\n\t\t\tSESSION_TOKEN '%s'", dlCfg.S3SessionToken)
+		secret += fmt.Sprintf(",\n\t\t\tSESSION_TOKEN '%s'", escapeSQLStringLiteral(dlCfg.S3SessionToken))
 	}
 
 	secret += "\n\t\t)"
@@ -1607,29 +1616,29 @@ func buildCredentialChainSecret(dlCfg DuckLakeConfig) string {
 
 	// Add chain if specified (e.g., "env;config" to check specific sources)
 	if dlCfg.S3Chain != "" {
-		secret += fmt.Sprintf(",\n\t\t\tCHAIN '%s'", dlCfg.S3Chain)
+		secret += fmt.Sprintf(",\n\t\t\tCHAIN '%s'", escapeSQLStringLiteral(dlCfg.S3Chain))
 	}
 
 	// Add profile if specified (for config chain)
 	if dlCfg.S3Profile != "" {
-		secret += fmt.Sprintf(",\n\t\t\tPROFILE '%s'", dlCfg.S3Profile)
+		secret += fmt.Sprintf(",\n\t\t\tPROFILE '%s'", escapeSQLStringLiteral(dlCfg.S3Profile))
 	}
 
 	// Add region override if specified
 	if dlCfg.S3Region != "" {
-		secret += fmt.Sprintf(",\n\t\t\tREGION '%s'", dlCfg.S3Region)
+		secret += fmt.Sprintf(",\n\t\t\tREGION '%s'", escapeSQLStringLiteral(dlCfg.S3Region))
 	}
 
 	// Add endpoint if specified (for custom S3-compatible storage)
 	if dlCfg.S3Endpoint != "" {
-		secret += fmt.Sprintf(",\n\t\t\tENDPOINT '%s'", dlCfg.S3Endpoint)
+		secret += fmt.Sprintf(",\n\t\t\tENDPOINT '%s'", escapeSQLStringLiteral(dlCfg.S3Endpoint))
 
 		// Also set URL style and SSL for custom endpoints
 		urlStyle := dlCfg.S3URLStyle
 		if urlStyle == "" {
 			urlStyle = "path"
 		}
-		secret += fmt.Sprintf(",\n\t\t\tURL_STYLE '%s'", urlStyle)
+		secret += fmt.Sprintf(",\n\t\t\tURL_STYLE '%s'", escapeSQLStringLiteral(urlStyle))
 
 		useSSL := "false"
 		if dlCfg.S3UseSSL {
@@ -1685,7 +1694,7 @@ func buildAWSSdkSecret(ctx context.Context, dlCfg DuckLakeConfig) (string, error
 			REGION '%s'`,
 		creds.AccessKeyID,
 		creds.SecretAccessKey,
-		region,
+		escapeSQLStringLiteral(region),
 	)
 
 	if creds.SessionToken != "" {
@@ -1693,12 +1702,12 @@ func buildAWSSdkSecret(ctx context.Context, dlCfg DuckLakeConfig) (string, error
 	}
 
 	if dlCfg.S3Endpoint != "" {
-		secret += fmt.Sprintf(",\n\t\t\tENDPOINT '%s'", dlCfg.S3Endpoint)
+		secret += fmt.Sprintf(",\n\t\t\tENDPOINT '%s'", escapeSQLStringLiteral(dlCfg.S3Endpoint))
 		urlStyle := dlCfg.S3URLStyle
 		if urlStyle == "" {
 			urlStyle = "path"
 		}
-		secret += fmt.Sprintf(",\n\t\t\tURL_STYLE '%s'", urlStyle)
+		secret += fmt.Sprintf(",\n\t\t\tURL_STYLE '%s'", escapeSQLStringLiteral(urlStyle))
 		useSSL := "false"
 		if dlCfg.S3UseSSL {
 			useSSL = "true"

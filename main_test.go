@@ -1,6 +1,8 @@
 package main
 
 import (
+	"github.com/posthog/duckgres/server"
+	"gopkg.in/yaml.v3"
 	"strings"
 	"testing"
 	"time"
@@ -850,5 +852,17 @@ func TestFilePersistenceRequiresDataDir(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected warning about empty data_dir, warnings: %v", warns)
+	}
+}
+
+func TestSourceYAMLConfigResolution(t *testing.T) {
+	var cfg FileConfig
+	if err := yaml.Unmarshal([]byte("sources:\n  - name: orders\n    type: postgres\n    host: db\n    port: 5432\n    database: app\n    user: reader\n    password: synthetic\n    sslmode: require\n"), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	got := resolveEffectiveConfig(&cfg, configCLIInputs{}, envFromMap(nil), func(string) {}).Server.Sources
+	want := server.SourceConfig{Name: "orders", Type: "postgres", Host: "db", Port: 5432, Database: "app", User: "reader", Password: "synthetic", SSLMode: "require"}
+	if len(got) != 1 || got[0] != want {
+		t.Fatal("source settings were not preserved")
 	}
 }

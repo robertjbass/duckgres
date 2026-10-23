@@ -426,3 +426,8 @@ test-profiling:
 [group('test')]
 test-copy-aliases expected="v1.5.6":
     DUCKGRES_EXPECTED_DUCKDB_VERSION={{expected}} go test -v -count=1 -p 1 ./server -run '^TestDuckDBCloudSQLCopyTransactionAliases$'
+
+# Targeted source replay tests.
+[group('test')]
+test-sources *args:
+    go test ./server -run 'TestSource' {{args}}

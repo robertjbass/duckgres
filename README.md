@@ -899,3 +899,67 @@ Never open a newer data file with an older binary merely because an API/image
 was rolled back. These checks do not qualify Cloud API lifecycle operations,
 moves, retained backups, mixed-image staging or production rollout. Those
 remain separate Cloud release gates and approval decisions.
+
+### Account source prototype
+
+The optional `sources` list attaches existing PostgreSQL or MariaDB/MySQL
+sources before a session accepts queries. No sources are attached by default.
+Use a separate Duckgres process per account: every configured Duckgres user
+can access its configured sources. Provision SELECT-only roles on each source;
+DuckDB's `READ_ONLY` attachment is additional protection, not an authorization
+boundary. Never put database administrator credentials in this configuration.
+
+```yaml
+sources:
+  - name: orders_source
+    type: postgres
+    host: postgres.internal
+    port: 5432
+    database: app
+    user: analytics_reader
+    password: replace_with_read_only_password
+    sslmode: require
+  - name: customers_source
+    type: mysql # MariaDB uses the mysql extension
+    host: mariadb.internal
+    port: 3306
+    database: app
+    user: analytics_reader
+    password: replace_with_read_only_password
+    sslmode: required
+query_log:
+  enabled: false
+```
+
+PostgreSQL `sslmode` uses libpq values; MySQL uses `disabled`, `preferred`,
+`required`, `verify_ca`, or `verify_identity`. An omitted value leaves the
+connector default unchanged. Require TLS for remote sources. MySQL's scanner
+parses unquoted connection tokens: this prototype rejects whitespace, quotes,
+backslashes, and equals signs in MySQL connection values. PostgreSQL values use
+libpq escaping. Aliases must be ASCII identifiers of at most 63 characters and
+cannot be `ducklake`, `memory`, `system`, or `temp`.
+
+Store the file with mode `0600`. Credentials are available inside the DuckDB
+process, including its catalog introspection; only account-authorized users
+may connect. Bootstrap does not send credential-bearing SQL through the client
+query logger, and returns sanitized errors. Client-issued SQL still follows the
+normal query logging rules. Extension installation requires network access on
+first use; use trusted, preinstalled extensions in restricted deployments.
+
+Restart the process after changing source settings or rotating credentials.
+Every new instance replays its sources. Concurrent file-backed clients reuse
+only an attachment with exactly matching type, connection string, and read-only
+state; conflicting aliases fail closed. If bootstrap fails, check source health,
+network access, SELECT grants, TLS settings, and alias conflicts, then restart.
+Fix the configuration instead of enabling credential-bearing debug SQL logging.
+
+For a separate DuckLake instance, configure its existing `ducklake` settings
+with PostgreSQL metadata and bucket-restricted S3/R2 credentials. This changes
+the default catalog to `ducklake`; do not silently apply it to an existing
+ordinary DuckDB database. DuckLake 1.1 requires the qualified DuckDB 2 runtime.
+
+Local qualification: `just test-sources`, `just test-unit`, and `just lint`.
+The runtime must also pass real PostgreSQL/MariaDB joins, rejected source writes,
+two simultaneous clients, reconnect, process restart, and credential-log checks
+before deployment. This config alone does not provision accounts, roles, buckets,
+or expose a user-facing source picker.

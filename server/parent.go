@@ -154,6 +154,7 @@ func (s *Server) spawnChildForTLS(conn net.Conn) (*ChildProcess, error) {
 		RemoteAddr:       remoteAddr,
 		DataDir:          s.cfg.DataDir,
 		Extensions:       s.cfg.Extensions,
+		Sources:          s.cfg.Sources,
 		IdleTimeout:      int64(s.cfg.IdleTimeout),
 		TLSCertFile:      s.cfg.TLSCertFile,
 		TLSKeyFile:       s.cfg.TLSKeyFile,

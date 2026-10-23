@@ -22,6 +22,8 @@ import (
 
 // FileConfig represents the YAML configuration file structure
 type FileConfig struct {
+	Sources []server.SourceConfig `yaml:"sources"`
+
 	Host                      string              `yaml:"host"`
 	Port                      int                 `yaml:"port"`
 	FlightPort                int                 `yaml:"flight_port"`                  // Control-plane Flight SQL ingress port (0 disables)
@@ -563,23 +565,23 @@ func main() {
 			ConfigPollInterval:   resolved.ConfigPollInterval,
 			InternalSecret:       resolved.InternalSecret,
 			K8s: controlplane.K8sConfig{
-				WorkerImage:       resolved.K8sWorkerImage,
-				WorkerNamespace:   resolved.K8sWorkerNamespace,
-				ControlPlaneID:    resolved.K8sControlPlaneID,
-				WorkerPort:        resolved.K8sWorkerPort,
-				WorkerSecret:      resolved.K8sWorkerSecret,
-				WorkerConfigMap:   resolved.K8sWorkerConfigMap,
-				ImagePullPolicy:   resolved.K8sWorkerImagePullPolicy,
-				ServiceAccount:    resolved.K8sWorkerServiceAccount,
-				MaxWorkers:        resolved.K8sMaxWorkers,
-				SharedWarmTarget:    resolved.K8sSharedWarmTarget,
-				WorkerCPURequest:    resolved.K8sWorkerCPURequest,
-				WorkerMemoryRequest: resolved.K8sWorkerMemoryRequest,
-				WorkerNodeSelector:  resolved.K8sWorkerNodeSelector,
+				WorkerImage:           resolved.K8sWorkerImage,
+				WorkerNamespace:       resolved.K8sWorkerNamespace,
+				ControlPlaneID:        resolved.K8sControlPlaneID,
+				WorkerPort:            resolved.K8sWorkerPort,
+				WorkerSecret:          resolved.K8sWorkerSecret,
+				WorkerConfigMap:       resolved.K8sWorkerConfigMap,
+				ImagePullPolicy:       resolved.K8sWorkerImagePullPolicy,
+				ServiceAccount:        resolved.K8sWorkerServiceAccount,
+				MaxWorkers:            resolved.K8sMaxWorkers,
+				SharedWarmTarget:      resolved.K8sSharedWarmTarget,
+				WorkerCPURequest:      resolved.K8sWorkerCPURequest,
+				WorkerMemoryRequest:   resolved.K8sWorkerMemoryRequest,
+				WorkerNodeSelector:    resolved.K8sWorkerNodeSelector,
 				WorkerTolerationKey:   resolved.K8sWorkerTolerationKey,
 				WorkerTolerationValue: resolved.K8sWorkerTolerationValue,
-				WorkerExclusiveNode:  resolved.K8sWorkerExclusiveNode,
-				AWSRegion:           resolved.AWSRegion,
+				WorkerExclusiveNode:   resolved.K8sWorkerExclusiveNode,
+				AWSRegion:             resolved.AWSRegion,
 			},
 		}
 		controlplane.RunControlPlane(cpCfg)
