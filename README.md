@@ -947,9 +947,12 @@ normal query logging rules. Extension installation requires network access on
 first use; use trusted, preinstalled extensions in restricted deployments.
 
 Restart the process after changing source settings or rotating credentials.
-Every new instance replays its sources. Concurrent file-backed clients reuse
+Every new standalone connection validates or replays its sources. Other run modes
+reject source configuration in this prototype. Concurrent file-backed clients reuse
 only an attachment with exactly matching type, connection string, and read-only
-state; conflicting aliases fail closed. If bootstrap fails, check source health,
+state; conflicting aliases fail closed. Authenticated users can still mutate
+attachments in their own account, including concurrently after validation; this
+is not an SQL authorization boundary. If bootstrap fails, check source health,
 network access, SELECT grants, TLS settings, and alias conflicts, then restart.
 Fix the configuration instead of enabling credential-bearing debug SQL logging.
 

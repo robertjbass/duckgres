@@ -728,6 +728,9 @@ func (s *Server) acquireFileDB(username string, passthrough bool) (*sql.DB, erro
 	defer s.fileDBsMu.Unlock()
 
 	if entry, ok := s.fileDBs[username]; ok {
+		if err := AttachSources(entry.db, s.cfg.Sources); err != nil {
+			return nil, err
+		}
 		entry.refs++
 		return entry.db, nil
 	}
@@ -1264,7 +1267,7 @@ func AttachDuckLake(db *sql.DB, dlCfg DuckLakeConfig, sem chan struct{}, dataDir
 	if !dlCfg.Migrate {
 		ensureDuckLakeMigrationCheck(dlCfg, dataDir)
 		if dlMigration.err != nil {
-			return fmt.Errorf("DuckLake migration check failed: %w", dlMigration.err)
+			return fmt.Errorf("DuckLake migration check failed")
 		}
 	}
 
@@ -1329,13 +1332,12 @@ func AttachDuckLake(db *sql.DB, dlCfg DuckLakeConfig, sem chan struct{}, dataDir
 	}
 	if migrate {
 		slog.Info("Attaching DuckLake catalog with automatic migration.",
-			"from", duckLakeMigrationCheckedVersion(), "to", duckLakeSpecVersion,
-			"metadata", redactConnectionString(dlCfg.MetadataStore))
+			"from", duckLakeMigrationCheckedVersion(), "to", duckLakeSpecVersion)
 	} else if dataPath != "" {
 		slog.Info("Attaching DuckLake catalog with data path.",
-			"metadata", redactConnectionString(dlCfg.MetadataStore), "data", dataPath)
+			"data", dataPath)
 	} else {
-		slog.Info("Attaching DuckLake catalog.", "metadata", redactConnectionString(dlCfg.MetadataStore))
+		slog.Info("Attaching DuckLake catalog.")
 	}
 
 	_, attachSpan := tracer.Start(context.Background(), "duckgres.ducklake_attach")
@@ -1404,7 +1406,7 @@ func ensureDuckLakeMetadataIndexes(dlCfg DuckLakeConfig) {
 	// pgx/stdlib accepts libpq key=value format directly.
 	pgDB, err := sql.Open("pgx", connStr)
 	if err != nil {
-		slog.Warn("Failed to open connection for DuckLake metadata indexes.", "error", err)
+		slog.Warn("Failed to open connection for DuckLake metadata indexes.")
 		return
 	}
 	defer func() { _ = pgDB.Close() }()
@@ -1415,7 +1417,7 @@ func ensureDuckLakeMetadataIndexes(dlCfg DuckLakeConfig) {
 	defer cancel()
 
 	if err := pgDB.PingContext(ctx); err != nil {
-		slog.Warn("Failed to connect to DuckLake metadata store for index creation.", "error", err)
+		slog.Warn("Failed to connect to DuckLake metadata store for index creation.")
 		return
 	}
 
@@ -1508,7 +1510,7 @@ func createS3Secret(db *sql.DB, dlCfg DuckLakeConfig) error {
 	}
 
 	if _, err := db.Exec(secretStmt); err != nil {
-		return err
+		return fmt.Errorf("S3 secret initialization failed")
 	}
 
 	slog.Info("Created S3 secret successfully.")

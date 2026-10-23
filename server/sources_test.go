@@ -79,9 +79,9 @@ func (r *sourceRecorder) ExecContext(_ context.Context, q string, _ ...any) (sql
 }
 func TestSourceBootstrap(t *testing.T) {
 	s := SourceConfig{Name: "app", Type: "postgres", Host: "db", Port: 5432, Database: "app", User: "reader", Password: "PRIVATE_SECRET"}
-	for _, failAt := range []int{1, 2, 3, 4} {
+	for _, failAt := range []int{1, 2, 3} {
 		r := &sourceRecorder{failAt: failAt}
-		err := AttachSources(r, []SourceConfig{s})
+		err := attachSources(r, []SourceConfig{s}, sourceAbsent)
 		if err == nil || strings.Contains(err.Error(), "PRIVATE_SECRET") || strings.Contains(err.Error(), "password=") {
 			t.Fatalf("unsafe bootstrap error: %v", err)
 		}
@@ -89,15 +89,15 @@ func TestSourceBootstrap(t *testing.T) {
 	r := &sourceRecorder{}
 	s2 := s
 	s2.Name = "other"
-	if err := AttachSources(r, []SourceConfig{s, s2}); err != nil {
+	if err := attachSources(r, []SourceConfig{s, s2}, sourceAbsent); err != nil {
 		t.Fatal(err)
 	}
-	if len(r.queries) != 6 || r.queries[0] != "INSTALL postgres" || r.queries[1] != "LOAD postgres" {
+	if len(r.queries) != 4 || r.queries[0] != "INSTALL postgres" || r.queries[1] != "LOAD postgres" {
 		t.Fatalf("unexpected bootstrap order: %v", r.queries)
 	}
 	for _, sources := range [][]SourceConfig{{s, s}, {s, {Name: "bad-name"}}} {
 		r := &sourceRecorder{}
-		if err := AttachSources(r, sources); err == nil || len(r.queries) != 0 {
+		if err := attachSources(r, sources, sourceAbsent); err == nil || len(r.queries) != 0 {
 			t.Fatal("invalid list executed partial bootstrap")
 		}
 	}
@@ -107,5 +107,47 @@ func TestSourceMySQLTLS(t *testing.T) {
 	q, err := sourceAttachSQL(s)
 	if err != nil || !strings.Contains(q, "ssl_mode=required") {
 		t.Fatalf("mysql TLS config: %q %v", q, err)
+	}
+}
+
+func TestSourceCachedConnectionRevalidates(t *testing.T) {
+	s := &Server{cfg: Config{FilePersistence: true, DataDir: t.TempDir()}, fileDBs: make(map[string]*fileDBEntry), duckLakeSem: make(chan struct{}, 1)}
+	if _, err := s.acquireFileDB("reader", false); err != nil {
+		t.Fatal(err)
+	}
+	defer s.releaseFileDB("reader")
+	s.cfg.Sources = []SourceConfig{{Name: "invalid-name"}}
+	if _, err := s.acquireFileDB("reader", false); err == nil {
+		t.Fatal("cached database bypassed source validation")
+	}
+	if s.fileDBs["reader"].refs != 1 {
+		t.Fatal("failed connection leaked database reference")
+	}
+}
+
+func sourceAbsent(context.Context, SourceConfig, string) (bool, error) { return false, nil }
+func TestSourceExistingCatalogVerification(t *testing.T) {
+	s := SourceConfig{Name: "app", Type: "postgres", Host: "db", Port: 5432, Database: "app", User: "reader"}
+	for _, mismatch := range []bool{false, true} {
+		r := &sourceRecorder{}
+		err := attachSources(r, []SourceConfig{s}, func(context.Context, SourceConfig, string) (bool, error) {
+			if mismatch {
+				return false, errors.New("PRIVATE_SECRET")
+			}
+			return true, nil
+		})
+		if mismatch && (err == nil || strings.Contains(err.Error(), "PRIVATE_SECRET")) {
+			t.Fatal("unsafe verification error")
+		}
+		if !mismatch && err != nil {
+			t.Fatal(err)
+		}
+		if len(r.queries) != 2 {
+			t.Fatal("existing catalog was reattached")
+		}
+	}
+	q, err := sourceAttachSQL(s)
+	if err != nil || strings.Contains(q, "IF NOT EXISTS") {
+		t.Fatal("alias race must not be silently accepted")
 	}
 }

@@ -88,7 +88,7 @@ func sourceAttachSQL(s SourceConfig) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("ATTACH IF NOT EXISTS '%s' AS \"%s\" (TYPE %s, READ_ONLY)", escapeSQLStringLiteral(dsn), s.Name, s.Type), nil
+	return fmt.Sprintf("ATTACH '%s' AS \"%s\" (TYPE %s, READ_ONLY)", escapeSQLStringLiteral(dsn), s.Name, s.Type), nil
 }
 
 // AttachSources runs outside the client query path so credentials never enter
@@ -98,7 +98,18 @@ type sourceExecer interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 }
 
-func AttachSources(db sourceExecer, sources []SourceConfig) error {
+func AttachSources(db *sql.DB, sources []SourceConfig) error {
+	return attachSources(db, sources, func(ctx context.Context, s SourceConfig, dsn string) (bool, error) {
+		var total, matching int
+		err := db.QueryRowContext(ctx, "SELECT count(*), count(*) FILTER (WHERE type = $2 AND path = $3 AND readonly) FROM duckdb_databases() WHERE lower(database_name) = lower($1)", s.Name, s.Type, dsn).Scan(&total, &matching)
+		if err != nil || total != matching {
+			return false, fmt.Errorf("catalog verification failed")
+		}
+		return total == 1, nil
+	})
+}
+
+func attachSources(db sourceExecer, sources []SourceConfig, exists func(context.Context, SourceConfig, string) (bool, error)) error {
 	statements := make([]string, len(sources))
 	names := make(map[string]bool, len(sources))
 	for i, s := range sources {
@@ -127,13 +138,17 @@ func AttachSources(db sourceExecer, sources []SourceConfig) error {
 			}
 			loaded[s.Type] = true
 		}
-		// File-backed native catalogs are shared across client handles. Reuse only
-		// an exact read-only attachment; never overwrite an unverified alias.
+		// File catalogs are shared by client handles. Verify an existing alias,
+		// or use plain ATTACH so a concurrent alias claim fails closed.
 		dsn, _ := sourceDSN(s)
-		check := fmt.Sprintf("SELECT CASE WHEN count(*) = 0 THEN true ELSE error('configured source alias conflict') END FROM duckdb_databases() WHERE lower(database_name) = lower('%s') AND (type IS DISTINCT FROM '%s' OR path IS DISTINCT FROM '%s' OR readonly IS DISTINCT FROM true)", s.Name, s.Type, escapeSQLStringLiteral(dsn))
-		if _, err := db.ExecContext(ctx, check); err != nil {
+		attached, err := exists(ctx, s, dsn)
+		if err != nil {
 			return fmt.Errorf("source %s: catalog verification failed", s.Name)
 		}
+		if attached {
+			continue
+		}
+
 		if _, err := db.ExecContext(ctx, statements[i]); err != nil {
 			return fmt.Errorf("source %s: attachment failed", s.Name)
 		}

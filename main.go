@@ -436,6 +436,9 @@ func main() {
 		slog.Warn(msg)
 	})
 	cfg := resolved.Server
+	if len(cfg.Sources) > 0 && *mode != "standalone" {
+		fatal("sources prototype supports standalone mode only")
+	}
 
 	// Handle --psql: launch psql connected to the local Duckgres server
 	if *psql {

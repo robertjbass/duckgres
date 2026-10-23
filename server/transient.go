@@ -45,7 +45,7 @@ func retryOnTransientAttach(fn func() error) error {
 	for attempt := 1; attempt <= transientMaxRetries; attempt++ {
 		slog.Warn("Transient DuckLake error during attach, retrying.",
 			"attempt", attempt, "max_retries", transientMaxRetries,
-			"backoff", backoff, "error", err)
+			"backoff", backoff)
 
 		time.Sleep(backoff)
 		backoff *= 2
@@ -59,7 +59,7 @@ func retryOnTransientAttach(fn func() error) error {
 		}
 	}
 
-	slog.Error("DuckLake attach retries exhausted.", "attempts", transientMaxRetries+1, "error", err)
+	slog.Error("DuckLake attach retries exhausted.", "attempts", transientMaxRetries+1)
 	return err
 }
 
