@@ -113,7 +113,7 @@ func defaultServerConfig() server.Config {
 		},
 		Extensions: []string{"ducklake"},
 		DuckLake: server.DuckLakeConfig{
-			CheckpointInterval:  24 * time.Hour,
+			CheckpointInterval:   24 * time.Hour,
 			DataInliningRowLimit: intPtr(0),
 		},
 		QueryLog: server.QueryLogConfig{
@@ -258,6 +258,9 @@ func resolveEffectiveConfig(fileCfg *FileConfig, cli configCLIInputs, getenv fun
 		}
 		if fileCfg.DuckLake.S3SecretKey != "" {
 			cfg.DuckLake.S3SecretKey = fileCfg.DuckLake.S3SecretKey
+		}
+		if fileCfg.DuckLake.S3SessionToken != "" {
+			cfg.DuckLake.S3SessionToken = fileCfg.DuckLake.S3SessionToken
 		}
 		if fileCfg.DuckLake.S3Region != "" {
 			cfg.DuckLake.S3Region = fileCfg.DuckLake.S3Region
@@ -986,12 +989,12 @@ func resolveEffectiveConfig(fileCfg *FileConfig, cli configCLIInputs, getenv fun
 		K8sWorkerServiceAccount:  k8sWorkerServiceAccount,
 		K8sMaxWorkers:            k8sMaxWorkers,
 		K8sSharedWarmTarget:      k8sSharedWarmTarget,
-		K8sWorkerCPURequest:     k8sWorkerCPURequest,
-		K8sWorkerMemoryRequest:  k8sWorkerMemoryRequest,
-		K8sWorkerNodeSelector:   k8sWorkerNodeSelector,
+		K8sWorkerCPURequest:      k8sWorkerCPURequest,
+		K8sWorkerMemoryRequest:   k8sWorkerMemoryRequest,
+		K8sWorkerNodeSelector:    k8sWorkerNodeSelector,
 		K8sWorkerTolerationKey:   k8sWorkerTolerationKey,
 		K8sWorkerTolerationValue: k8sWorkerTolerationValue,
-		K8sWorkerExclusiveNode:  k8sWorkerExclusiveNode,
+		K8sWorkerExclusiveNode:   k8sWorkerExclusiveNode,
 		AWSRegion:                awsRegion,
 		ConfigStoreConn:          configStoreConn,
 		ConfigPollInterval:       configPollInterval,

@@ -118,9 +118,12 @@ type DuckLakeFileConfig struct {
 	S3Endpoint  string `yaml:"s3_endpoint"`   // e.g., "localhost:9000" for MinIO
 	S3AccessKey string `yaml:"s3_access_key"` // S3 access key ID
 	S3SecretKey string `yaml:"s3_secret_key"` // S3 secret access key
-	S3Region    string `yaml:"s3_region"`     // S3 region (default: us-east-1)
-	S3UseSSL    bool   `yaml:"s3_use_ssl"`    // Use HTTPS for S3 connections
-	S3URLStyle  string `yaml:"s3_url_style"`  // "path" or "vhost" (default: path)
+	// Optional STS session token. Required for R2 temporary credentials.
+	// Never log this value.
+	S3SessionToken string `yaml:"s3_session_token"`
+	S3Region       string `yaml:"s3_region"`    // S3 region (default: us-east-1)
+	S3UseSSL       bool   `yaml:"s3_use_ssl"`   // Use HTTPS for S3 connections
+	S3URLStyle     string `yaml:"s3_url_style"` // "path" or "vhost" (default: path)
 
 	// Credential chain provider settings (AWS SDK credential chain)
 	S3Chain   string `yaml:"s3_chain"`   // e.g., "env;config" - which credential sources to check
