@@ -22,6 +22,8 @@ import (
 
 // FileConfig represents the YAML configuration file structure
 type FileConfig struct {
+	Sources []server.SourceConfig `yaml:"sources"`
+
 	Host                      string              `yaml:"host"`
 	Port                      int                 `yaml:"port"`
 	FlightPort                int                 `yaml:"flight_port"`                  // Control-plane Flight SQL ingress port (0 disables)
@@ -116,9 +118,12 @@ type DuckLakeFileConfig struct {
 	S3Endpoint  string `yaml:"s3_endpoint"`   // e.g., "localhost:9000" for MinIO
 	S3AccessKey string `yaml:"s3_access_key"` // S3 access key ID
 	S3SecretKey string `yaml:"s3_secret_key"` // S3 secret access key
-	S3Region    string `yaml:"s3_region"`     // S3 region (default: us-east-1)
-	S3UseSSL    bool   `yaml:"s3_use_ssl"`    // Use HTTPS for S3 connections
-	S3URLStyle  string `yaml:"s3_url_style"`  // "path" or "vhost" (default: path)
+	// Optional STS session token. Required for R2 temporary credentials.
+	// Never log this value.
+	S3SessionToken string `yaml:"s3_session_token"`
+	S3Region       string `yaml:"s3_region"`    // S3 region (default: us-east-1)
+	S3UseSSL       bool   `yaml:"s3_use_ssl"`   // Use HTTPS for S3 connections
+	S3URLStyle     string `yaml:"s3_url_style"` // "path" or "vhost" (default: path)
 
 	// Credential chain provider settings (AWS SDK credential chain)
 	S3Chain   string `yaml:"s3_chain"`   // e.g., "env;config" - which credential sources to check
@@ -434,6 +439,9 @@ func main() {
 		slog.Warn(msg)
 	})
 	cfg := resolved.Server
+	if len(cfg.Sources) > 0 && *mode != "standalone" {
+		fatal("sources prototype supports standalone mode only")
+	}
 
 	// Handle --psql: launch psql connected to the local Duckgres server
 	if *psql {
@@ -563,23 +571,23 @@ func main() {
 			ConfigPollInterval:   resolved.ConfigPollInterval,
 			InternalSecret:       resolved.InternalSecret,
 			K8s: controlplane.K8sConfig{
-				WorkerImage:       resolved.K8sWorkerImage,
-				WorkerNamespace:   resolved.K8sWorkerNamespace,
-				ControlPlaneID:    resolved.K8sControlPlaneID,
-				WorkerPort:        resolved.K8sWorkerPort,
-				WorkerSecret:      resolved.K8sWorkerSecret,
-				WorkerConfigMap:   resolved.K8sWorkerConfigMap,
-				ImagePullPolicy:   resolved.K8sWorkerImagePullPolicy,
-				ServiceAccount:    resolved.K8sWorkerServiceAccount,
-				MaxWorkers:        resolved.K8sMaxWorkers,
-				SharedWarmTarget:    resolved.K8sSharedWarmTarget,
-				WorkerCPURequest:    resolved.K8sWorkerCPURequest,
-				WorkerMemoryRequest: resolved.K8sWorkerMemoryRequest,
-				WorkerNodeSelector:  resolved.K8sWorkerNodeSelector,
+				WorkerImage:           resolved.K8sWorkerImage,
+				WorkerNamespace:       resolved.K8sWorkerNamespace,
+				ControlPlaneID:        resolved.K8sControlPlaneID,
+				WorkerPort:            resolved.K8sWorkerPort,
+				WorkerSecret:          resolved.K8sWorkerSecret,
+				WorkerConfigMap:       resolved.K8sWorkerConfigMap,
+				ImagePullPolicy:       resolved.K8sWorkerImagePullPolicy,
+				ServiceAccount:        resolved.K8sWorkerServiceAccount,
+				MaxWorkers:            resolved.K8sMaxWorkers,
+				SharedWarmTarget:      resolved.K8sSharedWarmTarget,
+				WorkerCPURequest:      resolved.K8sWorkerCPURequest,
+				WorkerMemoryRequest:   resolved.K8sWorkerMemoryRequest,
+				WorkerNodeSelector:    resolved.K8sWorkerNodeSelector,
 				WorkerTolerationKey:   resolved.K8sWorkerTolerationKey,
 				WorkerTolerationValue: resolved.K8sWorkerTolerationValue,
-				WorkerExclusiveNode:  resolved.K8sWorkerExclusiveNode,
-				AWSRegion:           resolved.AWSRegion,
+				WorkerExclusiveNode:   resolved.K8sWorkerExclusiveNode,
+				AWSRegion:             resolved.AWSRegion,
 			},
 		}
 		controlplane.RunControlPlane(cpCfg)

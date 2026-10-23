@@ -62,7 +62,7 @@ func NewDuckLakeCheckpointer(cfg Config) (*DuckLakeCheckpointer, error) {
 	attachStmt := buildDuckLakeAttachStmt(dlCfg, duckLakeMigrationNeeded())
 	if _, err := db.Exec(attachStmt); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("checkpoint: attach ducklake: %w", err)
+		return nil, fmt.Errorf("checkpoint: attach ducklake failed")
 	}
 
 	// Create system.checkpoints table to record checkpoint history

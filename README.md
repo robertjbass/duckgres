@@ -810,58 +810,159 @@ MIT
 
 ## Layerbase exact DuckDB runtime qualification
 
-The proposed `v0.1.6-layerbase` candidate is based on `v0.1.5-layerbase` and embeds DuckDB
-**1.5.6** through the official stable `duckdb-go/v2 v2.10506.0` and
-`duckdb-go-bindings v0.10506.0` modules. The Go driver module's major version
-is not the embedded DuckDB version.
+The shared candidate source retains the official stable driver
+`duckdb-go/v2 v2.10506.0`. Its committed dependency pins embed **DuckDB 1.5.6**
+through `duckdb-go-bindings v0.10506.0`. The native candidate workflow also
+qualifies **DuckDB 2.0.0** using the published stable bindings `v0.20000.0` and
+its official `go.duckdb.org/libduckdb` native modules. No unmerged driver fork,
+alpha, dev or nightly dependency is used. Each Actions artifact includes the
+exact generated `go.mod`, `go.sum`, dependency list and source commit.
 
-Run `just test-embedded-version` to check the embedded library and an actual
-TLS PostgreSQL connection, commit a row, restart the proxy against the same
-persistent directory, and verify both the exact version and row. The recipe
-accepts an exact expected library version, for example
-`just test-embedded-version v1.5.6`. Use
-`SELECT library_version FROM pragma_version()` to inspect a running proxy;
+Proposed immutable artifact identifiers are `v0.1.7-layerbase` for the corrected
+1.5.6 proxy and `v0.2.0-layerbase` for the 2.0 candidate. This workflow does not
+publish either release. Do not overwrite `v0.1.6-layerbase`, `v0.1.5-layerbase`
+or any older retained artifact.
+
+Run `just test-embedded-version v1.5.6` and `just test-cloud-sql v1.5.6`.
+The latter opens actual TLS PostgreSQL connections to disposable persistent
+fixtures, tests binary COPY beyond the 204,800-row automatic flush boundary,
+checks exact rows after failure and rollback, verifies converted values and
+NULLs, restarts the proxy, and checks actual library version and profiling.
+Use `SELECT library_version FROM pragma_version()` on a running proxy;
 `SELECT version()` intentionally advertises PostgreSQL compatibility.
 
-`just test-appender-contract` checks that a failed automatic appender flush
-remains visible on close. Standalone binary COPY uses the appender API.
+### COPY correctness regression and fix
 
-Do not relabel this artifact as DuckDB 2.0 or replace an existing database's
-runtime pin with it. Keep older proxy binaries available under their original
-versioned artifact identifiers. A deployment rollback must select the matching
-runtime for each database and must not open a newer data file with an older
-runtime merely because the API or image was rolled back.
+Qualification of the previous 1.5.6 source (`b51410f7a6c16769c1a1da301f04bbcf441dc42a`)
+and the stable 2.0 binding override found preexisting binary COPY defects:
 
-These local checks do not qualify Cloud API lifecycle operations, moves,
-retained backups, or staging image replacement. Those remain Cloud release gates.
+- With one preexisting row (`id=-1`), copying 210,005 integer rows with a final
+  duplicate returned an error but committed 204,800 imported rows. Expected
+  count/sum were `1/-1`; actual were `204801/20971417599` on both versions.
+- `BEGIN`, a successful 210,005-row binary COPY, and `ROLLBACK` left the imported
+  rows committed (`210006/22050945009` including the preexisting row).
+- Explicit-column binary COPY with a late duplicate committed its earlier
+  INSERT batches (`210001/22049894999`). Native text COPY was atomic.
+- The 2.0 pairing additionally committed 2,048 rows after a first-flush duplicate.
 
-### DuckDB 2.0 gate (2026-10-21)
+The fix uses the session's pinned raw connection for the appender and one
+transaction for all autocommit binary COPY flushes or batches. It never retries
+an appender after writes could have started. String-valued binary fields use
+SQL INSERT conversion from the start, covering DECIMAL, TIME, INTERVAL, UUID
+and ENUM representations as well as ordinary strings. This is deliberately
+conservative and can make string-containing binary imports slower; integer
+bulk imports retain the appender fast path. Existing explicit transactions
+retain their commit/rollback ownership, including START TRANSACTION, END and ABORT
+aliases. The targeted tests include invalid
+ENUM input followed by COMMIT, valid converted values and typed NULLs.
 
-Official bindings `v0.20000.0` contain stable DuckDB 2.0.0. Pairing them with
-the latest stable driver, `v2.10506.0`, passes the exact SQL-version and
-persistent-reopen test, but fails `test-appender-contract`: one `AppendRow`
-fails during automatic flush, then `Close` returns nil. The stable 1.5.6
-pairing passes the same contract test. This is a driver qualification failure,
-not evidence that every Cloud COPY request silently succeeds: Duckgres checks
-`AppendRow` errors immediately before its existing fallback path.
+This change does not claim to fix every existing COPY format. CSV with BLOB
+uses a separate fallback path and is outside this binary COPY qualification.
 
-The official compatibility fixes are in
-[duckdb-go PR 217](https://github.com/duckdb/duckdb-go/pull/217), open at
-`a25c5598b54c8683bd91c75fdde4559e04e33cb5` when checked. Wait for and qualify a
-stable tagged driver containing those fixes; do not ship the unmerged PR or
-reinterpret a successful version query as full compatibility.
+### Stable 2.0 driver diagnostic and exposed surface
 
-To reproduce the isolated probe without changing the candidate's dependency
-pins, copy `go.mod` and `go.sum` to a temporary `.mod`/`.sum` pair, run
+[duckdb-go PR 217](https://github.com/duckdb/duckdb-go/pull/217) was still open at
+`a25c5598b54c8683bd91c75fdde4559e04e33cb5` on 2026-10-21. The standalone proxy
+registers no Go scalar/table UDFs or custom Go log storage, so the reported
+NULL Go-UDF and custom-logging defects are not demonstrated on its Cloud SQL
+surface. The actual 2.0 profiling JSON schema changed; the fork accepts both
+flat 1.x metrics and grouped 2.x metrics without inventing unavailable values.
+
+`just test-appender-contract` preserves an upstream diagnostic that deliberately
+continues calling `AppendRow` after an error, then requires `Close` to repeat
+that failure. It uses the explicit `duckdb_driver_diagnostics` build tag.
+The stable 1.5.6 pair passes. With stable 2.0 bindings, one `AppendRow` fails and
+`Close` subsequently returns nil. The candidate workflow runs this diagnostic
+on both architectures, emits a visible warning for that exact known failure,
+and retains its log. Unexpected diagnostic failures still fail qualification.
+Duckgres stops at the first appender error; actual wire atomicity and persisted
+row assertions, not unsupported continuation after failure, gate the fork.
+
+To reproduce 2.0 without altering canonical dependency pins, copy `go.mod` and
+`go.sum` to a temporary `.mod`/`.sum` pair, run
 `go mod edit -modfile=<temporary.mod> -require=github.com/duckdb/duckdb-go-bindings@v0.20000.0`,
 and set `GOFLAGS="-modfile=<temporary.mod> -mod=mod"` for
-`just test-embedded-version v2.0.0` and `just test-appender-contract`.
+`just test-cloud-sql v2.0.0` and the other targeted recipes.
 
-The `DuckDB runtime candidate` workflow qualifies native Linux amd64 and arm64
-and uploads binaries with SHA-256 files to Actions artifacts. It has read-only
-repository permissions and creates no release or image tag. Before publishing
-`v0.1.6-layerbase`, verify both jobs and their exact source commit, combine the
-two checksum entries, and publish those identical bytes under a new immutable
-release. Preserve `v0.1.5-layerbase` and every older retained artifact. Publication
-and Cloud rollout are separate approvals; passing this workflow does not authorize
-changing any database's runtime pin.
+### Publication and rollback
+
+The candidate workflow qualifies native Linux amd64 and arm64, uses read-only
+repository permissions, and uploads binaries with SHA-256 files. Before any
+publication, verify all jobs and their exact source/dependency manifests. Publish
+only the reviewed identical bytes under a new immutable artifact identifier.
+The existing tag-triggered Layerbase release workflow can rebuild/overwrite an
+asset; inspect and coordinate that workflow before creating a release tag.
+
+Do not relabel a 1.x proxy as 2.0 or change an existing database's runtime pin.
+Retain each exact older artifact and use the matching runtime during rollback.
+Never open a newer data file with an older binary merely because an API/image
+was rolled back. These checks do not qualify Cloud API lifecycle operations,
+moves, retained backups, mixed-image staging or production rollout. Those
+remain separate Cloud release gates and approval decisions.
+
+### Account source prototype
+
+The optional `sources` list attaches existing PostgreSQL or MariaDB/MySQL
+sources before a session accepts queries. No sources are attached by default.
+Use a separate Duckgres process per account: every configured Duckgres user
+can access its configured sources. Provision SELECT-only roles on each source;
+DuckDB's `READ_ONLY` attachment is additional protection, not an authorization
+boundary. Never put database administrator credentials in this configuration.
+
+```yaml
+sources:
+  - name: orders_source
+    type: postgres
+    host: postgres.internal
+    port: 5432
+    database: app
+    user: analytics_reader
+    password: replace_with_read_only_password
+    sslmode: require
+  - name: customers_source
+    type: mysql # MariaDB uses the mysql extension
+    host: mariadb.internal
+    port: 3306
+    database: app
+    user: analytics_reader
+    password: replace_with_read_only_password
+    sslmode: required
+query_log:
+  enabled: false
+```
+
+PostgreSQL `sslmode` uses libpq values; MySQL uses `disabled`, `preferred`,
+`required`, `verify_ca`, or `verify_identity`. An omitted value leaves the
+connector default unchanged. Require TLS for remote sources. MySQL's scanner
+parses unquoted connection tokens: this prototype rejects whitespace, quotes,
+backslashes, and equals signs in MySQL connection values. PostgreSQL values use
+libpq escaping. Aliases must be ASCII identifiers of at most 63 characters and
+cannot be `ducklake`, `memory`, `system`, or `temp`.
+
+Store the file with mode `0600`. Credentials are available inside the DuckDB
+process, including its catalog introspection; only account-authorized users
+may connect. Bootstrap does not send credential-bearing SQL through the client
+query logger, and returns sanitized errors. Client-issued SQL still follows the
+normal query logging rules. Extension installation requires network access on
+first use; use trusted, preinstalled extensions in restricted deployments.
+
+Restart the process after changing source settings or rotating credentials.
+Every new standalone connection validates or replays its sources. Other run modes
+reject source configuration in this prototype. Concurrent file-backed clients reuse
+only an attachment with exactly matching type, connection string, and read-only
+state; conflicting aliases fail closed. Authenticated users can still mutate
+attachments in their own account, including concurrently after validation; this
+is not an SQL authorization boundary. If bootstrap fails, check source health,
+network access, SELECT grants, TLS settings, and alias conflicts, then restart.
+Fix the configuration instead of enabling credential-bearing debug SQL logging.
+
+For a separate DuckLake instance, configure its existing `ducklake` settings
+with PostgreSQL metadata and bucket-restricted S3/R2 credentials. This changes
+the default catalog to `ducklake`; do not silently apply it to an existing
+ordinary DuckDB database. DuckLake 1.1 requires the qualified DuckDB 2 runtime.
+
+Local qualification: `just test-sources`, `just test-unit`, and `just lint`.
+The runtime must also pass real PostgreSQL/MariaDB joins, rejected source writes,
+two simultaneous clients, reconnect, process restart, and credential-log checks
+before deployment. This config alone does not provision accounts, roles, buckets,
+or expose a user-facing source picker.

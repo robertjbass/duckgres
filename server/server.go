@@ -175,6 +175,7 @@ type Config struct {
 
 	// Extensions to load on database initialization
 	Extensions []string
+	Sources    []SourceConfig
 
 	// DuckLake configuration
 	DuckLake DuckLakeConfig
@@ -727,6 +728,9 @@ func (s *Server) acquireFileDB(username string, passthrough bool) (*sql.DB, erro
 	defer s.fileDBsMu.Unlock()
 
 	if entry, ok := s.fileDBs[username]; ok {
+		if err := AttachSources(entry.db, s.cfg.Sources); err != nil {
+			return nil, err
+		}
 		entry.refs++
 		return entry.db, nil
 	}
@@ -999,126 +1003,142 @@ func CreateDBConnection(cfg Config, duckLakeSem chan struct{}, username string, 
 	return db, nil
 }
 
+// duckLakeReplacesDefaultCatalog reports whether USE ducklake should run.
+// File persistence keeps the .duckdb file as the default catalog. DuckLake,
+// when configured, is attached as the ducklake alias and queried explicitly.
+func duckLakeReplacesDefaultCatalog(filePersistence bool) bool {
+	return !filePersistence
+}
+
+// withFileShimSession pins the only pool connection on the memory catalog
+// while fn creates compat shims, then restores the file catalog and releases
+// the pin before returning. Callers may use db again only after this returns.
+func withFileShimSession(db *sql.DB, username string, fn func(target sqlExec) error) error {
+	fileCtx := context.Background()
+	if err := attachMemoryCatalog(fileCtx, db); err != nil {
+		return err
+	}
+	conn, err := db.Conn(fileCtx)
+	if err != nil {
+		return fmt.Errorf("pin connection for shim init: %w", err)
+	}
+	restored := false
+	defer func() {
+		if !restored {
+			// The connection may be stuck on the memory catalog; a later
+			// session picking it up from the pool would silently write
+			// user data into memory. Discard the underlying connection
+			// instead of returning it to the pool.
+			_ = conn.Raw(func(driverConn any) error { return driver.ErrBadConn })
+		}
+		_ = conn.Close()
+	}()
+	if _, err := conn.ExecContext(fileCtx, "USE memory"); err != nil {
+		return fmt.Errorf("switch to memory catalog for shim init: %w", err)
+	}
+	fnErr := fn(connExec{ctx: fileCtx, conn: conn})
+	if _, err := conn.ExecContext(fileCtx, "USE "+quoteIdent(username)); err != nil {
+		slog.Warn("Failed to restore file catalog after shim init.",
+			"user", username, "error", err)
+		return fnErr
+	}
+	restored = true
+	// The column metadata table persists with the user's data, and
+	// older duckgres versions created the shims inside the file
+	// itself - clean those up now that the authoritative set lives
+	// in the memory catalog.
+	if err := ensureFileColumnMetadata(fileCtx, conn); err != nil {
+		slog.Warn("Failed to ensure column metadata table in file catalog.",
+			"user", username, "error", err)
+	}
+	if err := cleanupLegacyFileShims(fileCtx, conn); err != nil {
+		slog.Warn("Failed to clean up legacy shims in file catalog.",
+			"user", username, "error", err)
+	}
+	return fnErr
+}
+
+func initConnectionCompat(target sqlExec, username string, duckLakeMode bool, serverStartTime time.Time, serverVersion string) {
+	if err := initPgCatalog(target, serverStartTime, processStartTime, serverVersion, processVersion); err != nil {
+		slog.Warn("Failed to initialize pg_catalog.", "user", username, "error", err)
+	}
+	initClickHouseMacros(target)
+	if err := initInformationSchema(target, duckLakeMode); err != nil {
+		slog.Warn("Failed to initialize information_schema.", "user", username, "error", err)
+	}
+}
+
+func attachConfiguredDuckLake(db *sql.DB, cfg Config, duckLakeSem chan struct{}) (bool, error) {
+	if err := AttachDuckLake(db, cfg.DuckLake, duckLakeSem, cfg.DataDir); err != nil {
+		if cfg.DuckLake.MetadataStore != "" {
+			return false, fmt.Errorf("DuckLake configured but attachment failed: %w", err)
+		}
+		slog.Warn("Failed to attach DuckLake.", "error", err)
+		return false, nil
+	}
+	if cfg.DuckLake.MetadataStore == "" {
+		return false, nil
+	}
+	if err := recreatePgClassForDuckLake(db); err != nil {
+		slog.Warn("Failed to recreate pg_class_full for DuckLake.", "error", err)
+	}
+	if err := recreatePgNamespaceForDuckLake(db); err != nil {
+		slog.Warn("Failed to recreate pg_namespace for DuckLake.", "error", err)
+	}
+	return true, nil
+}
+
 // ConfigureDBConnection initializes an existing DuckDB connection with pg_catalog,
-// information_schema, and DuckLake catalog attachment.
+// information_schema, saved sources, and an optional DuckLake catalog.
 func ConfigureDBConnection(db *sql.DB, cfg Config, duckLakeSem chan struct{}, username string, serverStartTime time.Time, serverVersion string) error {
+	if err := AttachSources(db, cfg.Sources); err != nil {
+		return err
+	}
 	// In file-persistence mode the instance's default catalog is the user's
 	// database file. The compat shims must NOT be created there: they would
 	// persist into the file and leak into SHOW TABLES / DESCRIBE / exports,
 	// and the transpiler rewrites shim references to memory.main, which does
 	// not resolve against a file catalog ("Binder Error: Catalog \"memory\"
 	// does not exist"). Attach an in-memory catalog named memory and pin one
-	// connection switched to it for the duration of shim init, mirroring the
-	// DuckLake layout where user data and shims live in separate catalogs.
+	// connection switched to it for the duration of shim init.
 	// The pool is still capped at one connection here (openBaseDB sets
 	// MaxOpenConns(1); acquireFileDB widens it only after this returns), so
-	// nothing below may call db.* while the pinned connection is held.
-	var target sqlExec = db
+	// the pin is released before any later db-level ATTACH.
 	if cfg.FilePersistence {
-		fileCtx := context.Background()
-		if err := attachMemoryCatalog(fileCtx, db); err != nil {
+		if err := withFileShimSession(db, username, func(target sqlExec) error {
+			// File mode does not USE ducklake, so information_schema stays
+			// on the local catalog. The lake is queried as ducklake.*.
+			initConnectionCompat(target, username, false, serverStartTime, serverVersion)
+			return nil
+		}); err != nil {
 			return err
 		}
-		conn, err := db.Conn(fileCtx)
-		if err != nil {
-			return fmt.Errorf("pin connection for shim init: %w", err)
+		if cfg.DuckLake.MetadataStore != "" {
+			if _, err := attachConfiguredDuckLake(db, cfg, duckLakeSem); err != nil {
+				return err
+			}
 		}
-		restored := false
-		defer func() {
-			if !restored {
-				// The connection may be stuck on the memory catalog; a later
-				// session picking it up from the pool would silently write
-				// user data into memory. Discard the underlying connection
-				// instead of returning it to the pool.
-				_ = conn.Raw(func(driverConn any) error { return driver.ErrBadConn })
-			}
-			_ = conn.Close()
-		}()
-		if _, err := conn.ExecContext(fileCtx, "USE memory"); err != nil {
-			return fmt.Errorf("switch to memory catalog for shim init: %w", err)
-		}
-		target = connExec{ctx: fileCtx, conn: conn}
-		defer func() {
-			if _, err := conn.ExecContext(fileCtx, "USE "+quoteIdent(username)); err != nil {
-				slog.Warn("Failed to restore file catalog after shim init.",
-					"user", username, "error", err)
-				return
-			}
-			restored = true
-			// The column metadata table persists with the user's data, and
-			// older duckgres versions created the shims inside the file
-			// itself - clean those up now that the authoritative set lives
-			// in the memory catalog.
-			if err := ensureFileColumnMetadata(fileCtx, conn); err != nil {
-				slog.Warn("Failed to ensure column metadata table in file catalog.",
-					"user", username, "error", err)
-			}
-			if err := cleanupLegacyFileShims(fileCtx, conn); err != nil {
-				slog.Warn("Failed to clean up legacy shims in file catalog.",
-					"user", username, "error", err)
-			}
-		}()
+		return nil
 	}
 
-	// Initialize pg_catalog schema for PostgreSQL compatibility
-	// Must be done BEFORE attaching DuckLake so macros are created in memory.main,
-	// not in the DuckLake catalog (which doesn't support macro storage).
-	if err := initPgCatalog(target, serverStartTime, processStartTime, serverVersion, processVersion); err != nil {
+	// Macros are created before DuckLake attaches so they land in memory.main.
+	// information_schema runs after the attach, and USE ducklake runs last.
+	if err := initPgCatalog(db, serverStartTime, processStartTime, serverVersion, processVersion); err != nil {
 		slog.Warn("Failed to initialize pg_catalog.", "user", username, "error", err)
-		// Continue anyway - basic queries will still work
 	}
-
-	// Register ClickHouse SQL macros (chsql compat)
-	initClickHouseMacros(target)
-
-	// Attach DuckLake catalog if configured (but don't set as default yet).
-	// Skipped entirely in file-persistence mode: the two are mutually
-	// exclusive (file mode pins a pool-of-one connection above, and a
-	// db-level attach here would deadlock against it).
-	duckLakeMode := false
-	if !cfg.FilePersistence {
-		if err := AttachDuckLake(db, cfg.DuckLake, duckLakeSem, cfg.DataDir); err != nil {
-			// If DuckLake was explicitly configured, fail the connection.
-			// Silent fallback to local DB causes schema/table mismatches.
-			if cfg.DuckLake.MetadataStore != "" {
-				return fmt.Errorf("DuckLake configured but attachment failed: %w", err)
-			}
-			// DuckLake not configured, this warning is just informational
-			slog.Warn("Failed to attach DuckLake.", "user", username, "error", err)
-		} else if cfg.DuckLake.MetadataStore != "" {
-			duckLakeMode = true
-
-			// Recreate pg_class_full to source from DuckLake metadata instead of DuckDB's pg_catalog.
-			// This ensures consistent PostgreSQL-compatible OIDs across all pg_class queries.
-			if err := recreatePgClassForDuckLake(db); err != nil {
-				slog.Warn("Failed to recreate pg_class_full for DuckLake.", "error", err)
-				// Non-fatal: continue with DuckDB-based pg_class_full
-			}
-
-			// Recreate pg_namespace to source from DuckLake metadata.
-			// This ensures OIDs match pg_class_full for JOINs (e.g., Metabase table discovery).
-			if err := recreatePgNamespaceForDuckLake(db); err != nil {
-				slog.Warn("Failed to recreate pg_namespace for DuckLake.", "error", err)
-				// Non-fatal: continue with DuckDB-based pg_namespace
-			}
-		}
+	initClickHouseMacros(db)
+	attached, err := attachConfiguredDuckLake(db, cfg, duckLakeSem)
+	if err != nil {
+		return err
 	}
-
-	// Initialize information_schema compatibility views in memory.main
-	// Must be done AFTER attaching DuckLake (so views can reference ducklake.information_schema)
-	// but BEFORE setting DuckLake as default (so views are created in memory.main, not ducklake.main)
-	if err := initInformationSchema(target, duckLakeMode); err != nil {
+	if err := initInformationSchema(db, attached); err != nil {
 		slog.Warn("Failed to initialize information_schema.", "user", username, "error", err)
-		// Continue anyway - basic queries will still work
 	}
-
-	// Now set DuckLake as the default catalog so all user queries use it
-	if duckLakeMode {
+	if attached && duckLakeReplacesDefaultCatalog(cfg.FilePersistence) {
 		if err := setDuckLakeDefault(db); err != nil {
 			return fmt.Errorf("failed to set DuckLake as default: %w", err)
 		}
 	}
-
 	return nil
 }
 
@@ -1159,20 +1179,26 @@ func CreatePassthroughDBConnection(cfg Config, duckLakeSem chan struct{}, userna
 		return nil, err
 	}
 
+	if err := AttachSources(db, cfg.Sources); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+
 	// Utility macros (uptime, version) are useful for all connections.
 	initUtilityMacros(db, serverStartTime, processStartTime, serverVersion, processVersion)
 
 	// Register ClickHouse SQL macros (chsql compat)
 	initClickHouseMacros(db)
 
-	// Attach DuckLake catalog if configured (same data, no pg_catalog views)
+	// Attach DuckLake catalog if configured (same data, no pg_catalog views).
+	// File persistence keeps the .duckdb file as the default catalog.
 	if err := AttachDuckLake(db, cfg.DuckLake, duckLakeSem, cfg.DataDir); err != nil {
 		if cfg.DuckLake.MetadataStore != "" {
 			_ = db.Close()
 			return nil, fmt.Errorf("DuckLake configured but attachment failed: %w", err)
 		}
 		slog.Warn("Failed to attach DuckLake.", "user", username, "error", err)
-	} else if cfg.DuckLake.MetadataStore != "" {
+	} else if cfg.DuckLake.MetadataStore != "" && duckLakeReplacesDefaultCatalog(cfg.FilePersistence) {
 		if err := setDuckLakeDefault(db); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("failed to set DuckLake as default: %w", err)
@@ -1255,7 +1281,7 @@ func AttachDuckLake(db *sql.DB, dlCfg DuckLakeConfig, sem chan struct{}, dataDir
 	if !dlCfg.Migrate {
 		ensureDuckLakeMigrationCheck(dlCfg, dataDir)
 		if dlMigration.err != nil {
-			return fmt.Errorf("DuckLake migration check failed: %w", dlMigration.err)
+			return fmt.Errorf("DuckLake migration check failed")
 		}
 	}
 
@@ -1292,7 +1318,7 @@ func AttachDuckLake(db *sql.DB, dlCfg DuckLakeConfig, sem chan struct{}, dataDir
 
 		if needsSecret {
 			if err := createS3Secret(db, dlCfg); err != nil {
-				return fmt.Errorf("failed to create S3 secret: %w", err)
+				return fmt.Errorf("failed to create S3 secret")
 			}
 		}
 	}
@@ -1320,13 +1346,12 @@ func AttachDuckLake(db *sql.DB, dlCfg DuckLakeConfig, sem chan struct{}, dataDir
 	}
 	if migrate {
 		slog.Info("Attaching DuckLake catalog with automatic migration.",
-			"from", duckLakeMigrationCheckedVersion(), "to", duckLakeSpecVersion,
-			"metadata", redactConnectionString(dlCfg.MetadataStore))
+			"from", duckLakeMigrationCheckedVersion(), "to", duckLakeSpecVersion)
 	} else if dataPath != "" {
 		slog.Info("Attaching DuckLake catalog with data path.",
-			"metadata", redactConnectionString(dlCfg.MetadataStore), "data", dataPath)
+			"data", dataPath)
 	} else {
-		slog.Info("Attaching DuckLake catalog.", "metadata", redactConnectionString(dlCfg.MetadataStore))
+		slog.Info("Attaching DuckLake catalog.")
 	}
 
 	_, attachSpan := tracer.Start(context.Background(), "duckgres.ducklake_attach")
@@ -1335,7 +1360,7 @@ func AttachDuckLake(db *sql.DB, dlCfg DuckLakeConfig, sem chan struct{}, dataDir
 		return err
 	}); err != nil {
 		attachSpan.End()
-		return fmt.Errorf("failed to attach DuckLake: %w", err)
+		return fmt.Errorf("failed to attach DuckLake catalog")
 	}
 	attachSpan.End()
 
@@ -1395,7 +1420,7 @@ func ensureDuckLakeMetadataIndexes(dlCfg DuckLakeConfig) {
 	// pgx/stdlib accepts libpq key=value format directly.
 	pgDB, err := sql.Open("pgx", connStr)
 	if err != nil {
-		slog.Warn("Failed to open connection for DuckLake metadata indexes.", "error", err)
+		slog.Warn("Failed to open connection for DuckLake metadata indexes.")
 		return
 	}
 	defer func() { _ = pgDB.Close() }()
@@ -1406,7 +1431,7 @@ func ensureDuckLakeMetadataIndexes(dlCfg DuckLakeConfig) {
 	defer cancel()
 
 	if err := pgDB.PingContext(ctx); err != nil {
-		slog.Warn("Failed to connect to DuckLake metadata store for index creation.", "error", err)
+		slog.Warn("Failed to connect to DuckLake metadata store for index creation.")
 		return
 	}
 
@@ -1499,7 +1524,7 @@ func createS3Secret(db *sql.DB, dlCfg DuckLakeConfig) error {
 	}
 
 	if _, err := db.Exec(secretStmt); err != nil {
-		return err
+		return fmt.Errorf("S3 secret initialization failed")
 	}
 
 	slog.Info("Created S3 secret successfully.")
@@ -1577,20 +1602,20 @@ func buildConfigSecret(dlCfg DuckLakeConfig) string {
 			REGION '%s',
 			URL_STYLE '%s',
 			USE_SSL %s`,
-		dlCfg.S3AccessKey,
-		dlCfg.S3SecretKey,
-		region,
-		urlStyle,
+		escapeSQLStringLiteral(dlCfg.S3AccessKey),
+		escapeSQLStringLiteral(dlCfg.S3SecretKey),
+		escapeSQLStringLiteral(region),
+		escapeSQLStringLiteral(urlStyle),
 		useSSL,
 	)
 
 	// Add endpoint if specified (for MinIO or custom S3-compatible storage)
 	if dlCfg.S3Endpoint != "" {
-		secret += fmt.Sprintf(",\n\t\t\tENDPOINT '%s'", dlCfg.S3Endpoint)
+		secret += fmt.Sprintf(",\n\t\t\tENDPOINT '%s'", escapeSQLStringLiteral(dlCfg.S3Endpoint))
 	}
 
 	if dlCfg.S3SessionToken != "" {
-		secret += fmt.Sprintf(",\n\t\t\tSESSION_TOKEN '%s'", dlCfg.S3SessionToken)
+		secret += fmt.Sprintf(",\n\t\t\tSESSION_TOKEN '%s'", escapeSQLStringLiteral(dlCfg.S3SessionToken))
 	}
 
 	secret += "\n\t\t)"
@@ -1607,29 +1632,29 @@ func buildCredentialChainSecret(dlCfg DuckLakeConfig) string {
 
 	// Add chain if specified (e.g., "env;config" to check specific sources)
 	if dlCfg.S3Chain != "" {
-		secret += fmt.Sprintf(",\n\t\t\tCHAIN '%s'", dlCfg.S3Chain)
+		secret += fmt.Sprintf(",\n\t\t\tCHAIN '%s'", escapeSQLStringLiteral(dlCfg.S3Chain))
 	}
 
 	// Add profile if specified (for config chain)
 	if dlCfg.S3Profile != "" {
-		secret += fmt.Sprintf(",\n\t\t\tPROFILE '%s'", dlCfg.S3Profile)
+		secret += fmt.Sprintf(",\n\t\t\tPROFILE '%s'", escapeSQLStringLiteral(dlCfg.S3Profile))
 	}
 
 	// Add region override if specified
 	if dlCfg.S3Region != "" {
-		secret += fmt.Sprintf(",\n\t\t\tREGION '%s'", dlCfg.S3Region)
+		secret += fmt.Sprintf(",\n\t\t\tREGION '%s'", escapeSQLStringLiteral(dlCfg.S3Region))
 	}
 
 	// Add endpoint if specified (for custom S3-compatible storage)
 	if dlCfg.S3Endpoint != "" {
-		secret += fmt.Sprintf(",\n\t\t\tENDPOINT '%s'", dlCfg.S3Endpoint)
+		secret += fmt.Sprintf(",\n\t\t\tENDPOINT '%s'", escapeSQLStringLiteral(dlCfg.S3Endpoint))
 
 		// Also set URL style and SSL for custom endpoints
 		urlStyle := dlCfg.S3URLStyle
 		if urlStyle == "" {
 			urlStyle = "path"
 		}
-		secret += fmt.Sprintf(",\n\t\t\tURL_STYLE '%s'", urlStyle)
+		secret += fmt.Sprintf(",\n\t\t\tURL_STYLE '%s'", escapeSQLStringLiteral(urlStyle))
 
 		useSSL := "false"
 		if dlCfg.S3UseSSL {
@@ -1685,7 +1710,7 @@ func buildAWSSdkSecret(ctx context.Context, dlCfg DuckLakeConfig) (string, error
 			REGION '%s'`,
 		creds.AccessKeyID,
 		creds.SecretAccessKey,
-		region,
+		escapeSQLStringLiteral(region),
 	)
 
 	if creds.SessionToken != "" {
@@ -1693,12 +1718,12 @@ func buildAWSSdkSecret(ctx context.Context, dlCfg DuckLakeConfig) (string, error
 	}
 
 	if dlCfg.S3Endpoint != "" {
-		secret += fmt.Sprintf(",\n\t\t\tENDPOINT '%s'", dlCfg.S3Endpoint)
+		secret += fmt.Sprintf(",\n\t\t\tENDPOINT '%s'", escapeSQLStringLiteral(dlCfg.S3Endpoint))
 		urlStyle := dlCfg.S3URLStyle
 		if urlStyle == "" {
 			urlStyle = "path"
 		}
-		secret += fmt.Sprintf(",\n\t\t\tURL_STYLE '%s'", urlStyle)
+		secret += fmt.Sprintf(",\n\t\t\tURL_STYLE '%s'", escapeSQLStringLiteral(urlStyle))
 		useSSL := "false"
 		if dlCfg.S3UseSSL {
 			useSSL = "true"

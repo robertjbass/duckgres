@@ -28,6 +28,7 @@ const (
 // ChildConfig contains all configuration needed by a child worker process.
 // It is passed from parent to child via the DUCKGRES_CHILD_CONFIG env var as JSON.
 type ChildConfig struct {
+	Sources []SourceConfig `json:"sources"`
 	// Connection info (RemoteAddr is known at spawn time; Username/Database are read after TLS)
 	RemoteAddr string `json:"remote_addr"`
 
@@ -271,6 +272,7 @@ func runChildWorker(tcpConn *net.TCPConn, cfg *ChildConfig) int {
 	serverCfg := Config{
 		DataDir:     cfg.DataDir,
 		Extensions:  cfg.Extensions,
+		Sources:     cfg.Sources,
 		DuckLake:    cfg.DuckLake,
 		IdleTimeout: time.Duration(cfg.IdleTimeout),
 		TLSCertFile: cfg.TLSCertFile,
@@ -382,4 +384,3 @@ func runChildWorker(tcpConn *net.TCPConn, cfg *ChildConfig) int {
 		return ExitSuccess
 	}
 }
-

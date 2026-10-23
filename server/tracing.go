@@ -31,18 +31,19 @@ func truncateForSpan(q string) string {
 
 // profilingRoot represents the top-level DuckDB JSON profiling output.
 type profilingRoot struct {
-	Latency                  float64           `json:"latency"`
-	CPUTime                  float64           `json:"cpu_time"`
-	RowsReturned             uint64            `json:"rows_returned"`
-	ResultSetSize            uint64            `json:"result_set_size"`
-	TotalMemoryAllocated     uint64            `json:"total_memory_allocated"`
-	PeakBufferMemory         uint64            `json:"system_peak_buffer_memory"`
-	TotalBytesRead           uint64            `json:"total_bytes_read"`
-	Planner                  float64           `json:"planner"`
-	PlannerBinding           float64           `json:"planner_binding"`
-	CumulativeOptimizerTiming float64          `json:"cumulative_optimizer_timing"`
-	PhysicalPlanner          float64           `json:"physical_planner"`
-	Children                 []profilingOperator `json:"children"`
+	Latency                   float64             `json:"latency"`
+	CPUTime                   float64             `json:"cpu_time"`
+	RowsReturned              uint64              `json:"rows_returned"`
+	ResultSetSize             uint64              `json:"result_set_size"`
+	TotalMemoryAllocated      uint64              `json:"total_memory_allocated"`
+	PeakBufferMemory          uint64              `json:"system_peak_buffer_memory"`
+	TotalBytesRead            uint64              `json:"total_bytes_read"`
+	Planner                   float64             `json:"planner"`
+	PlannerBinding            float64             `json:"planner_binding"`
+	CumulativeOptimizerTiming float64             `json:"cumulative_optimizer_timing"`
+	PhysicalPlanner           float64             `json:"physical_planner"`
+	Children                  []profilingOperator `json:"children"`
+	groupedMetrics            bool
 }
 
 type profilingOperator struct {
@@ -53,10 +54,81 @@ type profilingOperator struct {
 	Children            []profilingOperator `json:"children"`
 }
 
+// DuckDB 2.0 groups metrics by category and uses a separate operator tree.
+// Intermediate row/byte totals are not result sizes, so they are intentionally
+// absent here rather than being exposed as rows_returned or result_set_size.
+type groupedProfiling struct {
+	Query struct {
+		TotalTime float64 `json:"total_time"`
+		CPUTime   float64 `json:"cpu_time"`
+	} `json:"query"`
+	System struct {
+		TotalMemoryAllocated uint64 `json:"total_memory_allocated"`
+		PeakBufferMemory     uint64 `json:"peak_buffer_memory"`
+	} `json:"system"`
+	IO struct {
+		TotalBytesRead uint64 `json:"total_bytes_read"`
+	} `json:"io"`
+	Planner struct {
+		TotalTime   float64 `json:"total_time"`
+		BindingTime float64 `json:"binding_time"`
+	} `json:"planner"`
+	Optimizer struct {
+		TotalTime float64 `json:"total_time"`
+	} `json:"optimizer"`
+	PhysicalPlanner struct {
+		TotalTime float64 `json:"total_time"`
+	} `json:"physical_planner"`
+	Operators []groupedProfilingOperator `json:"operator"`
+}
+
+type groupedProfilingOperator struct {
+	Type        string                     `json:"type"`
+	Timing      float64                    `json:"timing"`
+	RowsScanned uint64                     `json:"rows_scanned"`
+	Children    []groupedProfilingOperator `json:"children"`
+}
+
+func normalizeProfilingOperators(operators []groupedProfilingOperator) []profilingOperator {
+	result := make([]profilingOperator, len(operators))
+	for i, op := range operators {
+		result[i] = profilingOperator{
+			OperatorName: op.Type, OperatorTiming: op.Timing,
+			OperatorRowsScanned: op.RowsScanned,
+			Children:            normalizeProfilingOperators(op.Children),
+		}
+	}
+	return result
+}
+
 // parseProfilingOutput extracts the full profiling tree from DuckDB's JSON output.
 func parseProfilingOutput(jsonStr string) (profilingRoot, bool) {
 	if jsonStr == "" {
 		return profilingRoot{}, false
+	}
+	var format struct {
+		Query json.RawMessage `json:"query"`
+	}
+	if err := json.Unmarshal([]byte(jsonStr), &format); err != nil {
+		return profilingRoot{}, false
+	}
+	if format.Query != nil {
+		var grouped groupedProfiling
+		if err := json.Unmarshal([]byte(jsonStr), &grouped); err != nil {
+			return profilingRoot{}, false
+		}
+		return profilingRoot{
+			Latency: grouped.Query.TotalTime, CPUTime: grouped.Query.CPUTime,
+			TotalMemoryAllocated:      grouped.System.TotalMemoryAllocated,
+			PeakBufferMemory:          grouped.System.PeakBufferMemory,
+			TotalBytesRead:            grouped.IO.TotalBytesRead,
+			Planner:                   grouped.Planner.TotalTime,
+			PlannerBinding:            grouped.Planner.BindingTime,
+			CumulativeOptimizerTiming: grouped.Optimizer.TotalTime,
+			PhysicalPlanner:           grouped.PhysicalPlanner.TotalTime,
+			Children:                  normalizeProfilingOperators(grouped.Operators),
+			groupedMetrics:            true,
+		}, true
 	}
 	var root profilingRoot
 	if err := json.Unmarshal([]byte(jsonStr), &root); err != nil {
@@ -104,12 +176,16 @@ func enrichSpanWithProfiling(ctx context.Context, span trace.Span, execStart tim
 	// Set top-level metrics on the execute span.
 	span.SetAttributes(
 		attribute.Float64("duckdb.latency_s", m.Latency),
-		attribute.Int64("duckdb.rows_returned", int64(m.RowsReturned)),
-		attribute.Int64("duckdb.result_set_size", int64(m.ResultSetSize)),
 		attribute.Int64("duckdb.total_memory_allocated", int64(m.TotalMemoryAllocated)),
 		attribute.Int64("duckdb.peak_buffer_memory", int64(m.PeakBufferMemory)),
 		attribute.Int64("duckdb.total_bytes_read", int64(m.TotalBytesRead)),
 	)
+	if !m.groupedMetrics {
+		span.SetAttributes(
+			attribute.Int64("duckdb.rows_returned", int64(m.RowsReturned)),
+			attribute.Int64("duckdb.result_set_size", int64(m.ResultSetSize)),
+		)
+	}
 
 	// Create child spans with explicit timestamps for the planning, scan,
 	// and compute phases. These are approximate — operators may overlap in

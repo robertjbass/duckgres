@@ -150,8 +150,19 @@ func (e *PinnedExecutor) Exec(query string, args ...any) (ExecResult, error) {
 	return e.conn.ExecContext(context.Background(), query, args...)
 }
 
+// borrowedRawConn keeps bulk writes on the session's pinned connection without
+// allowing the appender's deferred Close to return that connection to the pool.
+type borrowedRawConn struct {
+	*sql.Conn
+}
+
+func (borrowedRawConn) Close() error { return nil }
+
 func (e *PinnedExecutor) ConnContext(ctx context.Context) (RawConn, error) {
-	return e.db.Conn(ctx)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return borrowedRawConn{e.conn}, nil
 }
 
 func (e *PinnedExecutor) PingContext(ctx context.Context) error {

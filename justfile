@@ -404,7 +404,30 @@ bootstrap-ducklake:
 test-embedded-version expected="v1.5.6":
     DUCKGRES_EXPECTED_DUCKDB_VERSION={{expected}} go test -v -count=1 -p 1 ./server -run '^Test(EmbeddedDuckDBVersion|DuckDBProxyVersionAndPersistentReopen)$'
 
-# Validate driver error reporting used by binary COPY.
+# Diagnose upstream continuation after appender errors; not the proxy acceptance gate.
 [group('test')]
 test-appender-contract:
-    go test -v -count=1 -p 1 ./server -run '^TestDuckDBAppenderRetainsAutomaticFlushFailure$'
+    go test -tags duckdb_driver_diagnostics -v -count=1 -p 1 ./server -run '^TestDuckDBAppenderRetainsAutomaticFlushFailure$'
+
+# Qualify standalone wire COPY atomicity, transaction affinity and persisted rows.
+[group('test')]
+test-cloud-sql expected="v1.5.6":
+    DUCKGRES_EXPECTED_DUCKDB_VERSION={{expected}} go test -v -count=1 -p 1 -timeout 5m ./server -run '^TestDuckDBCloudSQL|^TestProfilingOutputToFile$'
+
+# Focused COPY conversion and failed-transaction regression checks.
+[group('test')]
+test-copy-conversions expected="v1.5.6":
+    DUCKGRES_EXPECTED_DUCKDB_VERSION={{expected}} go test -v -count=1 -p 1 -timeout 2m ./server -run '^TestDuckDBCloudSQLCopyConvert|^TestDuckDBCloudSQLCopyConversion'
+
+[group('test')]
+test-profiling:
+    go test -v -count=1 -p 1 ./server -run '^Test(ParseProfilingOutput|ProfilingOutputToFile)$'
+
+[group('test')]
+test-copy-aliases expected="v1.5.6":
+    DUCKGRES_EXPECTED_DUCKDB_VERSION={{expected}} go test -v -count=1 -p 1 ./server -run '^TestDuckDBCloudSQLCopyTransactionAliases$'
+
+# Targeted source replay tests.
+[group('test')]
+test-sources *args:
+    go test ./server -run 'TestSource' {{args}}
