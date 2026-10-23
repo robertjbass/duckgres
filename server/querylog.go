@@ -103,7 +103,7 @@ func NewQueryLogger(cfg Config) (*QueryLogger, error) {
 	attachStmt := buildDuckLakeAttachStmt(dlCfg, duckLakeMigrationNeeded())
 	if _, err := db.Exec(attachStmt); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("querylog: attach ducklake: %w", err)
+		return nil, fmt.Errorf("querylog: attach ducklake failed")
 	}
 
 	// Create schema and table
