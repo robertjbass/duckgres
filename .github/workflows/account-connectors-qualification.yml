@@ -38,8 +38,10 @@ jobs:
       - name: Native Quack authentication, shared instance and lifecycle
         run: just test-account-connectors
       - name: Compile native fixture executable
+        if: ${{ !cancelled() }}
         run: just build-account-connector-tests
       - name: Isolated external PostgreSQL TLS and reconnect
+        if: ${{ !cancelled() }}
         run: |
           PG_BIN=$(dirname "$(find /usr/lib/postgresql -name initdb -type f | sort -V | tail -1)")
           test -x "$PG_BIN/initdb"

@@ -108,7 +108,7 @@ func TestQuackNativeAuthenticationSharedInstanceAndRestart(t *testing.T) {
 				}
 			}
 			if cycle == 0 {
-				if _, err := pg.ExecContext(ctx, "CREATE TABLE quackfixture.main.quack_native_rows (id INTEGER); INSERT INTO quackfixture.main.quack_native_rows VALUES (1)"); err != nil {
+				if _, err := pg.ExecContext(ctx, "CREATE TABLE quack_native_rows (id INTEGER); INSERT INTO quack_native_rows VALUES (1)"); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -179,7 +179,7 @@ func TestQuackNativeAuthenticationSharedInstanceAndRestart(t *testing.T) {
 					if _, err := client.ExecContext(ctx, "INSERT INTO remote.main.quack_native_rows VALUES (2)"); err != nil {
 						t.Fatal(err)
 					}
-					if err := pg.QueryRowContext(ctx, "SELECT count(*) FROM quackfixture.main.quack_native_rows").Scan(&count); err != nil {
+					if err := pg.QueryRowContext(ctx, "SELECT count(*) FROM quack_native_rows").Scan(&count); err != nil {
 						t.Fatal(err)
 					}
 					if count != cycle+2 {
