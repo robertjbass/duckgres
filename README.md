@@ -939,6 +939,42 @@ backslashes, and equals signs in MySQL connection values. PostgreSQL values use
 libpq escaping. Aliases must be ASCII identifiers of at most 63 characters and
 cannot be `ducklake`, `memory`, `system`, or `temp`.
 
+#### External source runtime prerequisites (not a production availability claim)
+
+`public_only` defaults to `false`, preserving existing internal sources. When
+provisioning an external source, the trusted control plane must set it to `true`
+and supply `hostaddr` as a checked numeric public IP plus `ca_file` as a clean,
+absolute path to a managed CA bundle. `ca_file` maps to libpq `sslrootcert` or
+MySQL `ssl_ca`. Never accept a user-supplied filesystem path; install the supplied
+CA certificate (or the system trust bundle) in an account-controlled runtime path.
+The control plane owns file permissions, lifecycle, and removal. The runtime does
+not create or download CA files; an unreadable or invalid bundle fails attachment.
+
+PostgreSQL public sources require `sslmode: verify-full`. `host` keeps the server's
+certificate hostname and `hostaddr` pins the actual dial address, including native
+reconnects. Resolve the hostname, reject every forbidden DNS answer and all
+host-owned public addresses, then provide the checked pin. Refresh the pin and
+restart after endpoint changes; never fall back to unpinned hostname dialing.
+
+MariaDB public sources require `sslmode: verify_identity` and identical numeric
+`host` and `hostaddr` values. Their server certificate must verify that IP identity
+(an IP SAN), using the configured CA. The scanner has no separate dial address and
+TLS hostname setting, so ordinary external MariaDB hostname endpoints are not
+supported by this prerequisite. Do not replace certificate verification with
+`required` or `verify_ca`. General hostname support needs qualified network egress
+enforcement or a connector/protocol-aware proxy that separates dial address from
+TLS identity.
+
+The runtime rejects private, loopback, link-local, reserved, documentation,
+multicast and non-global IPv6 ranges. This static configuration validation is not
+a process-wide network sandbox: native reconnects retain the numeric pin, but do
+not reevaluate changing host-owned addresses. A strict per-connection dynamic
+policy and arbitrary user-issued attachments need network-level enforcement.
+Neither the new options nor unit tests qualify an external-source production
+release. Before publishing a runtime artifact, verify trusted-CA success,
+untrusted/mismatched-certificate failures, reconnects, and rejected internal
+destinations against each exact PostgreSQL/MySQL extension build.
+
 Store the file with mode `0600`. Credentials are available inside the DuckDB
 process, including its catalog introspection; only account-authorized users
 may connect. Bootstrap does not send credential-bearing SQL through the client
@@ -966,3 +1002,10 @@ The runtime must also pass real PostgreSQL/MariaDB joins, rejected source writes
 two simultaneous clients, reconnect, process restart, and credential-log checks
 before deployment. This config alone does not provision accounts, roles, buckets,
 or expose a user-facing source picker.
+
+`duckgres --runtime-capabilities` prints one JSON line without loading account
+configuration or starting listeners: `schema_version: 1`, with boolean
+`features.external_postgres_v1` and `features.quack_v1`. Unknown schema, missing
+feature, probe failure or an unqualified executable digest must fail closed.
+These flags describe compiled support only, not connectivity, extension presence,
+artifact qualification or live readiness.

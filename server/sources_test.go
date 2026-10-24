@@ -151,3 +151,86 @@ func TestSourceExistingCatalogVerification(t *testing.T) {
 		t.Fatal("alias race must not be silently accepted")
 	}
 }
+
+// Public source config is provisioned by the control plane, never a raw DSN.
+func TestSourcePublicPostgresTLS(t *testing.T) {
+	s := SourceConfig{Name: "external", Type: "postgres", Host: "db.example.com", HostAddr: "8.8.8.8", Port: 5432, Database: "app", User: "reader", SSLMode: "verify-full", CAFile: "/etc/duckgres/source-ca.pem", PublicOnly: true}
+	dsn, err := sourceDSN(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, part := range []string{"host='db.example.com'", "hostaddr='8.8.8.8'", "sslmode='verify-full'", "sslrootcert='/etc/duckgres/source-ca.pem'"} {
+		if !strings.Contains(dsn, part) {
+			t.Fatalf("missing %q", part)
+		}
+	}
+	for _, mode := range []string{"", "require", "verify-ca", "prefer", "disable"} {
+		changed := s
+		changed.SSLMode = mode
+		if _, err := sourceDSN(changed); err == nil {
+			t.Errorf("accepted TLS mode %q", mode)
+		}
+	}
+	for _, host := range []string{"db.example.com,other.example.com", "/tmp", "@socket", "", "bad host"} {
+		changed := s
+		changed.Host = host
+		if _, err := sourceDSN(changed); err == nil {
+			t.Errorf("accepted public host %q", host)
+		}
+	}
+	for _, ca := range []string{"", "relative.pem", "/etc/../tmp/ca.pem", "/tmp/ca.pem\n", "/tmp/ca.pem\x00"} {
+		changed := s
+		changed.CAFile = ca
+		if _, err := sourceDSN(changed); err == nil {
+			t.Errorf("accepted CA path %q", ca)
+		}
+	}
+}
+
+func TestSourcePublicAddressValidation(t *testing.T) {
+	s := SourceConfig{Name: "external", Type: "postgres", Host: "db.example.com", Port: 5432, Database: "app", User: "reader", SSLMode: "verify-full", CAFile: "/etc/duckgres/source-ca.pem", PublicOnly: true}
+	for _, address := range []string{"", "db.example.com", "8.8.8.8,127.0.0.1", "127.0.0.1", "0.0.0.0", "10.1.2.3", "172.16.0.1", "192.168.0.1", "169.254.169.254", "100.64.0.1", "192.0.0.1", "192.0.2.1", "198.18.0.1", "198.51.100.1", "203.0.113.1", "224.0.0.1", "255.255.255.255", "::", "::1", "fc00::1", "fe80::1", "ff02::1", "::ffff:127.0.0.1", "::ffff:10.1.2.3", "::ffff:192.168.1.1", "::ffff:169.254.169.254", "::ffff:224.0.0.1", "::808:808", "64:ff9b::808:808", "64:ff9b:1::808:808", "2001::808:808", "2001:2::1", "2001:db8::1", "2002:808:808::1", "3fff::1", "fe80::1%eth0"} {
+		s.HostAddr = address
+		if _, err := sourceDSN(s); err == nil {
+			t.Errorf("accepted blocked address %q", address)
+		}
+	}
+	for _, address := range []string{"8.8.8.8", "::ffff:8.8.8.8", "2606:4700:4700::1111"} {
+		s.HostAddr = address
+		if _, err := sourceDSN(s); err != nil {
+			t.Errorf("rejected public address %q: %v", address, err)
+		}
+	}
+}
+
+func TestSourcePublicMySQLRequiresVerifiedIPIdentity(t *testing.T) {
+	s := SourceConfig{Name: "external", Type: "mysql", Host: "8.8.8.8", HostAddr: "8.8.8.8", Port: 3306, Database: "app", User: "reader", SSLMode: "verify_identity", CAFile: "/etc/duckgres/source-ca.pem", PublicOnly: true}
+	dsn, err := sourceDSN(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(dsn, "ssl_ca=/etc/duckgres/source-ca.pem") || strings.Contains(dsn, "hostaddr=") {
+		t.Fatalf("incorrect mysql TLS parameters: %s", dsn)
+	}
+	for _, host := range []string{"db.example.com", "1.1.1.1", "127.0.0.1"} {
+		changed := s
+		changed.Host = host
+		if _, err := sourceDSN(changed); err == nil {
+			t.Errorf("accepted unpinned mysql host %q", host)
+		}
+	}
+	for _, mode := range []string{"", "required", "verify_ca", "preferred", "disabled"} {
+		changed := s
+		changed.SSLMode = mode
+		if _, err := sourceDSN(changed); err == nil {
+			t.Errorf("accepted mysql TLS mode %q", mode)
+		}
+	}
+	s.PublicOnly = false
+	s.HostAddr = ""
+	s.Host = "db.internal"
+	s.SSLMode = ""
+	if _, err := sourceDSN(s); err != nil {
+		t.Fatalf("changed internal defaults: %v", err)
+	}
+}

@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/netip"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -24,6 +26,10 @@ type SourceConfig struct {
 	User     string `yaml:"user" json:"user"`
 	Password string `yaml:"password" json:"password"`
 	SSLMode  string `yaml:"sslmode" json:"sslmode"`
+	// Set by the trusted control plane; never accept arbitrary DSN options.
+	HostAddr   string `yaml:"hostaddr" json:"hostaddr"`
+	CAFile     string `yaml:"ca_file" json:"ca_file"`
+	PublicOnly bool   `yaml:"public_only" json:"public_only"`
 }
 
 var sourceAlias = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,62}$`)
@@ -43,15 +49,44 @@ func sourceDSN(s SourceConfig) (string, error) {
 	if s.Host == "" || s.Database == "" || s.User == "" || s.Port < 1 || s.Port > 65535 {
 		return "", fmt.Errorf("invalid source connection settings")
 	}
-	for _, value := range []string{s.Host, s.Database, s.User, s.Password, s.SSLMode} {
+	for _, value := range []string{s.Host, s.Database, s.User, s.Password, s.SSLMode, s.HostAddr, s.CAFile} {
 		if strings.ContainsAny(value, "\x00\r\n") {
 			return "", fmt.Errorf("source settings contain control characters")
+		}
+	}
+	if s.CAFile != "" && (!filepath.IsAbs(s.CAFile) || filepath.Clean(s.CAFile) != s.CAFile) {
+		return "", fmt.Errorf("source CA file must be a clean absolute managed path")
+	}
+	if s.HostAddr != "" {
+		address, err := netip.ParseAddr(s.HostAddr)
+		if err != nil || address.Zone() != "" {
+			return "", fmt.Errorf("source hostaddr must be a numeric address")
+		}
+		if s.Type == "mysql" {
+			host, err := netip.ParseAddr(s.Host)
+			if err != nil || host != address {
+				return "", fmt.Errorf("mysql source requires identical numeric host and hostaddr")
+			}
+		}
+	}
+	if s.PublicOnly {
+		if !publicSourceAddress(s.HostAddr) {
+			return "", fmt.Errorf("public source requires a pinned globally routable address")
+		}
+		if s.CAFile == "" {
+			return "", fmt.Errorf("public source requires a managed CA file")
+		}
+		if !validPublicSourceHost(s.Host) {
+			return "", fmt.Errorf("public source requires a single hostname or IP address")
+		}
+		if (s.Type == "postgres" && s.SSLMode != "verify-full") || (s.Type == "mysql" && s.SSLMode != "verify_identity") {
+			return "", fmt.Errorf("public source requires verified TLS identity")
 		}
 	}
 	// PostgreSQL uses libpq quoting; MySQL scanner values are unquoted tokens.
 	quote := func(v string) string { return "'" + strings.NewReplacer(`\`, `\\`, `'`, `\'`).Replace(v) + "'" }
 	if s.Type == "mysql" {
-		for _, value := range []string{s.Host, s.Database, s.User, s.Password} {
+		for _, value := range []string{s.Host, s.Database, s.User, s.Password, s.CAFile} {
 			if strings.ContainsAny(value, " \t\r\n'\"\\=") {
 				return "", fmt.Errorf("mysql source values cannot contain whitespace, quotes, backslashes or equals")
 			}
@@ -80,7 +115,78 @@ func sourceDSN(s SourceConfig) (string, error) {
 			dsn += " ssl_mode=" + quote(s.SSLMode)
 		}
 	}
+	if s.Type == "postgres" && s.HostAddr != "" {
+		dsn += " hostaddr=" + quote(s.HostAddr)
+	}
+	if s.CAFile != "" {
+		key := "sslrootcert"
+		if s.Type == "mysql" {
+			key = "ssl_ca"
+		}
+		dsn += " " + key + "=" + quote(s.CAFile)
+	}
 	return dsn, nil
+}
+
+// This conservative static policy prevents DNS rebinding through native
+// reconnects. The control plane must additionally exclude host-owned addresses
+// and refresh pins on restart; dynamic per-dial policy needs network enforcement.
+func publicSourceAddress(value string) bool {
+	address, err := netip.ParseAddr(value)
+	if err != nil || address.Zone() != "" {
+		return false
+	}
+	address = address.Unmap()
+	if !address.IsGlobalUnicast() {
+		return false
+	}
+	if address.Is4() {
+		for _, prefix := range blockedSourceIPv4 {
+			if prefix.Contains(address) {
+				return false
+			}
+		}
+		return true
+	}
+	if !netip.MustParsePrefix("2000::/3").Contains(address) {
+		return false
+	}
+	for _, prefix := range blockedSourceIPv6 {
+		if prefix.Contains(address) {
+			return false
+		}
+	}
+	return true
+}
+
+var blockedSourceIPv4 = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"), netip.MustParsePrefix("10.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"), netip.MustParsePrefix("127.0.0.0/8"),
+	netip.MustParsePrefix("169.254.0.0/16"), netip.MustParsePrefix("172.16.0.0/12"),
+	netip.MustParsePrefix("192.0.0.0/24"), netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("192.88.99.0/24"), netip.MustParsePrefix("192.168.0.0/16"),
+	netip.MustParsePrefix("198.18.0.0/15"), netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"), netip.MustParsePrefix("224.0.0.0/3"),
+}
+var blockedSourceIPv6 = []netip.Prefix{
+	netip.MustParsePrefix("2001::/23"), netip.MustParsePrefix("2001:db8::/32"),
+	netip.MustParsePrefix("2002::/16"), netip.MustParsePrefix("3fff::/20"),
+}
+var publicSourceDNSLabel = regexp.MustCompile(`^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$`)
+
+func validPublicSourceHost(host string) bool {
+	if address, err := netip.ParseAddr(host); err == nil {
+		return address.Zone() == ""
+	}
+	if len(host) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if !publicSourceDNSLabel.MatchString(label) {
+			return false
+		}
+	}
+	return true
 }
 
 func sourceAttachSQL(s SourceConfig) (string, error) {

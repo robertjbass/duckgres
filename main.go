@@ -182,6 +182,12 @@ func initMetrics() *http.Server {
 }
 
 func main() {
+	// This exact, read-only probe never loads configuration or starts a worker.
+	if len(os.Args) == 2 && os.Args[1] == "--runtime-capabilities" {
+		fmt.Println(runtimeCapabilitiesJSON())
+		return
+	}
+
 	// Ignore SIGPIPE to prevent DuckDB's C++ code (and libraries like libpq
 	// inside DuckLake) from crashing the process when a network connection
 	// drops mid-query. Go already converts EPIPE to errors on Write; the
