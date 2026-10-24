@@ -1002,3 +1002,10 @@ The runtime must also pass real PostgreSQL/MariaDB joins, rejected source writes
 two simultaneous clients, reconnect, process restart, and credential-log checks
 before deployment. This config alone does not provision accounts, roles, buckets,
 or expose a user-facing source picker.
+
+`duckgres --runtime-capabilities` prints one JSON line without loading account
+configuration or starting listeners: `schema_version: 1`, with boolean
+`features.external_postgres_v1` and `features.quack_v1`. Unknown schema, missing
+feature, probe failure or an unqualified executable digest must fail closed.
+These flags describe compiled support only, not connectivity, extension presence,
+artifact qualification or live readiness.
