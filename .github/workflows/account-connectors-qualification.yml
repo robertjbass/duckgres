@@ -53,6 +53,8 @@ jobs:
           args: --timeout=15m
       - name: Existing runtime wire regression
         run: just test-cloud-sql v2.0.0
+      - name: Full unit suite
+        run: just test-unit
       - name: Build candidate only
         run: |
           just build-release qualification-only
