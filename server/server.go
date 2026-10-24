@@ -176,6 +176,7 @@ type Config struct {
 	// Extensions to load on database initialization
 	Extensions []string
 	Sources    []SourceConfig
+	Quack      QuackConfig
 
 	// DuckLake configuration
 	DuckLake DuckLakeConfig
@@ -335,8 +336,11 @@ type Server struct {
 
 	// Per-user shared DB pool for file persistence mode.
 	// Each user gets one *sql.DB; PG connections share it via pinned *sql.Conn.
-	fileDBsMu sync.Mutex
-	fileDBs   map[string]*fileDBEntry
+	fileDBsMu  sync.Mutex
+	fileDBs    map[string]*fileDBEntry
+	quackMu    sync.Mutex
+	quackDB    *sql.DB
+	quackProxy *quackUnixProxy
 
 	// Per-user lock serializing session metadata init in file mode. The
 	// session metadata SQL rewrites shared views in the pooled instance's
@@ -355,6 +359,9 @@ type Server struct {
 }
 
 func New(cfg Config) (*Server, error) {
+	if err := cfg.Quack.Validate(cfg.FilePersistence, cfg.DataDir, cfg.Users, cfg.ProcessIsolation, cfg.Port); err != nil {
+		return nil, err
+	}
 	// Apply default rate limit config for any unset fields
 	defaults := DefaultRateLimitConfig()
 	if cfg.RateLimit.MaxFailedAttempts == 0 {
@@ -479,6 +486,10 @@ func (s *Server) ListenAndServe() error {
 		return fmt.Errorf("failed to listen: %w", err)
 	}
 	s.listener = listener
+	if err := s.startQuackListener(); err != nil {
+		_ = listener.Close()
+		return err
+	}
 
 	for {
 		conn, err := listener.Accept()
@@ -511,6 +522,11 @@ func (s *Server) Close() error {
 	s.closeMu.Lock()
 	s.closed = true
 	s.closeMu.Unlock()
+
+	// Quack ingress stops before waiting for PostgreSQL clients.
+	if err := s.stopQuackListener(); err != nil {
+		slog.Warn("Quack listener shutdown failed")
+	}
 
 	// Stop accepting new connections
 	if s.listener != nil {
@@ -586,6 +602,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.closeMu.Lock()
 	s.closed = true
 	s.closeMu.Unlock()
+
+	// Quack ingress stops before waiting for PostgreSQL clients.
+	if err := s.stopQuackListener(); err != nil {
+		slog.Warn("Quack listener shutdown failed")
+	}
 
 	// Stop accepting new connections
 	if s.listener != nil {

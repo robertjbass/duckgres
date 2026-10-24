@@ -431,3 +431,10 @@ test-copy-aliases expected="v1.5.6":
 [group('test')]
 test-sources *args:
     go test ./server -run 'TestSource' {{args}}
+
+# Isolated native fixture qualification; no runtime publication.
+test-account-connectors:
+    go test -count=1 -v -timeout=5m ./server -run 'TestQuackNative|TestExternalPostgresNative'
+
+build-account-connector-tests:
+    go test -c -o server.test ./server

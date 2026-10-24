@@ -1,0 +1,76 @@
+name: Account connector qualification (no publication)
+
+on:
+  push:
+    branches: [feat/external-quack-qualification]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      GOMAXPROCS: '2'
+      GOFLAGS: -p=1
+      DUCKGRES_EXPECTED_DUCKDB_VERSION: v2.0.0
+      DUCKGRES_QUALIFICATION_EXTENSIONS: /tmp/qualification-extensions
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@f8a3cce218d9f83db3a2ecd90e41ac3de6cdfd9b
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.5'
+      - name: Select exact DuckDB 2 bindings
+        run: |
+          go mod edit -require=github.com/duckdb/duckdb-go-bindings@v0.20000.0
+          go mod tidy
+      - name: Fetch ABI-matched official extension artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p "$DUCKGRES_QUALIFICATION_EXTENSIONS/v2.0.0/linux_amd64"
+          for extension in quack httpfs postgres_scanner; do
+            curl --fail --location --retry 3 --max-time 120 "https://extensions.duckdb.org/v2.0.0/linux_amd64/${extension}.duckdb_extension.gz" | gzip -d > "$DUCKGRES_QUALIFICATION_EXTENSIONS/v2.0.0/linux_amd64/${extension}.duckdb_extension"
+          done
+          sha256sum "$DUCKGRES_QUALIFICATION_EXTENSIONS"/v2.0.0/linux_amd64/* > extension-checksums.txt
+      - name: Native Quack authentication, shared instance and lifecycle
+        run: just test-account-connectors
+      - name: Compile native fixture executable
+        if: ${{ !cancelled() }}
+        run: just build-account-connector-tests
+      - name: Isolated external PostgreSQL TLS and reconnect
+        if: ${{ !cancelled() }}
+        run: |
+          PG_BIN=$(dirname "$(find /usr/lib/postgresql -name initdb -type f | sort -V | tail -1)")
+          test -x "$PG_BIN/initdb"
+          bash scripts/qualify-external-postgres.sh "$PWD/server.test" "$DUCKGRES_QUALIFICATION_EXTENSIONS" "$PG_BIN"
+      - name: Lint
+        uses: golangci/golangci-lint-action@9fae48acfc02a90574d7c304a1758ef9895495fa
+        with:
+          version: v2.8.0
+          args: --timeout=15m
+      - name: Existing runtime wire regression
+        run: just test-cloud-sql v2.0.0
+      - name: Full unit suite
+        run: just test-unit
+      - name: Build candidate only
+        run: |
+          just build-release qualification-only
+          mkdir -p candidate
+          cp duckgres candidate/duckgres-linux-amd64
+          ./duckgres --runtime-capabilities > candidate/capabilities.json
+          printf '%s\n' '${{ github.sha }}' > candidate/source-commit.txt
+          printf '%s\n' '{"duckdb_version":"v2.0.0","bindings_version":"v0.20000.0","platform":"linux_amd64","external_postgres_v1":true,"quack_v1":true,"publication":false}' > candidate/qualification.json
+          cp extension-checksums.txt go.mod go.sum candidate/
+          sha256sum candidate/duckgres-linux-amd64 > candidate/checksums.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: account-connectors-qualification-${{ github.sha }}
+          path: |
+            candidate/
+            extension-checksums.txt
+          retention-days: 7
+          if-no-files-found: warn

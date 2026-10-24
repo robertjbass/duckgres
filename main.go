@@ -23,6 +23,7 @@ import (
 // FileConfig represents the YAML configuration file structure
 type FileConfig struct {
 	Sources []server.SourceConfig `yaml:"sources"`
+	Quack   server.QuackConfig    `yaml:"quack"`
 
 	Host                      string              `yaml:"host"`
 	Port                      int                 `yaml:"port"`
@@ -182,6 +183,12 @@ func initMetrics() *http.Server {
 }
 
 func main() {
+	// This exact, read-only probe never loads configuration or starts a worker.
+	if len(os.Args) == 2 && os.Args[1] == "--runtime-capabilities" {
+		fmt.Println(runtimeCapabilitiesJSON())
+		return
+	}
+
 	// Ignore SIGPIPE to prevent DuckDB's C++ code (and libraries like libpq
 	// inside DuckLake) from crashing the process when a network connection
 	// drops mid-query. Go already converts EPIPE to errors on Write; the
@@ -439,6 +446,9 @@ func main() {
 		slog.Warn(msg)
 	})
 	cfg := resolved.Server
+	if cfg.Quack.Enabled && *mode != "standalone" {
+		fatal("quack listener supports standalone mode only")
+	}
 	if len(cfg.Sources) > 0 && *mode != "standalone" {
 		fatal("sources prototype supports standalone mode only")
 	}
