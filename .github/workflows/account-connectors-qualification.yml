@@ -60,6 +60,7 @@ jobs:
           cp duckgres candidate/duckgres-linux-amd64
           ./duckgres --runtime-capabilities > candidate/capabilities.json
           printf '%s\n' '${{ github.sha }}' > candidate/source-commit.txt
+          printf '%s\n' '{"duckdb_version":"v2.0.0","bindings_version":"v0.20000.0","platform":"linux_amd64","external_postgres_v1":true,"quack_v1":true,"publication":false}' > candidate/qualification.json
           cp extension-checksums.txt go.mod go.sum candidate/
           sha256sum candidate/duckgres-linux-amd64 > candidate/checksums.txt
       - uses: actions/upload-artifact@v4

@@ -107,6 +107,14 @@ func TestQuackNativeAuthenticationSharedInstanceAndRestart(t *testing.T) {
 				case <-time.After(50 * time.Millisecond):
 				}
 			}
+			var engineVersion string
+			if err := pg.QueryRowContext(ctx, "SELECT library_version FROM pragma_version()").Scan(&engineVersion); err != nil {
+				t.Fatal(err)
+			}
+			if engineVersion != "v2.0.0" {
+				t.Fatalf("Quack qualification requires v2.0.0, got %s", engineVersion)
+			}
+			t.Logf("native shared instance engine=%s", engineVersion)
 			if cycle == 0 {
 				if _, err := pg.ExecContext(ctx, "CREATE TABLE quack_native_rows (id INTEGER); INSERT INTO quack_native_rows VALUES (1)"); err != nil {
 					t.Fatal(err)
