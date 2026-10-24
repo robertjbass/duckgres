@@ -76,9 +76,9 @@ func TestExternalPostgresNativeTLSAndReconnect(t *testing.T) {
 		var address string
 		var ssl bool
 		err := db.QueryRowContext(ctx, `SELECT address, tls FROM postgres_query('external_pg',
-			'SELECT inet_server_addr()::text AS address, ssl AS tls FROM pg_stat_ssl WHERE pid = pg_backend_pid()')`).Scan(&address, &ssl)
+			'SELECT host(inet_server_addr()) AS address, ssl AS tls FROM pg_stat_ssl WHERE pid = pg_backend_pid()')`).Scan(&address, &ssl)
 		if err == nil && (address != source.HostAddr || !ssl) {
-			t.Fatal("native connection did not use pinned address and TLS")
+			t.Fatalf("native connection address=%q TLS=%t; expected pinned address and TLS", address, ssl)
 		}
 		return err
 	}
