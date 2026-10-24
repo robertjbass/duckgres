@@ -1062,3 +1062,9 @@ Proxy failures use generic errors without logging tokens or payloads.
 The host gateway must authorize the database and validate its canonical mounted
 socket path and container generation before relaying bytes. Socket availability
 alone does not qualify native Quack authentication or prove a ready endpoint.
+`duckgres --runtime-capabilities` prints one JSON line without loading account
+configuration or starting listeners: `schema_version: 1`, with boolean
+`features.external_postgres_v1` and `features.quack_v1`. Unknown schema, missing
+feature, probe failure or an unqualified executable digest must fail closed.
+These flags describe compiled support only, not connectivity, extension presence,
+artifact qualification or live readiness.
