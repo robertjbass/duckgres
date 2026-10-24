@@ -233,6 +233,7 @@ func resolveEffectiveConfig(fileCfg *FileConfig, cli configCLIInputs, getenv fun
 		}
 
 		cfg.Sources = fileCfg.Sources
+		cfg.Quack = fileCfg.Quack
 
 		if len(fileCfg.Extensions) > 0 {
 			cfg.Extensions = fileCfg.Extensions

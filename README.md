@@ -966,3 +966,63 @@ The runtime must also pass real PostgreSQL/MariaDB joins, rejected source writes
 two simultaneous clients, reconnect, process restart, and credential-log checks
 before deployment. This config alone does not provision accounts, roles, buckets,
 or expose a user-facing source picker.
+
+### Opt-in account Quack listener (qualification pending)
+
+Quack is DuckDB's HTTP binary protocol. Its extension creates connections against
+its existing `DatabaseInstance`; it must not be launched in a second DuckDB
+process against an account's writable file. The account listener contract is:
+
+```yaml
+quack:
+  enabled: false
+  unix_proxy: false
+  port: 19494
+  user: account_reader
+  token: replace_with_a_random_32_or_more_character_url_safe_token
+```
+
+The listener is disabled by default. Enabling it requires standalone mode,
+file persistence with a data directory, exactly one configured account user,
+and no process isolation. The user must match that sole account user. The port
+must be explicit and differ from the PostgreSQL port; the token must contain
+32–256 ASCII letters, digits, underscores or hyphens. The control plane must
+provide a cryptographically random token and keep the configuration mode 0600.
+No public hostname override or automatic extension installation is supported.
+
+The intended endpoint is always `quack:127.0.0.1:<port>`. A process-lifetime
+reference to the existing shared file database keeps the same DuckDB instance
+alive for PostgreSQL and Quack. Quack uses its default token authentication;
+the token grants full account SQL access, not read-only access. PostgreSQL
+transpilation, query logging, connection limits and cancellation do not wrap
+Quack requests. Treat all authenticated SQL clients as account owners.
+
+Cloud routing needs a TLS-terminating, account-authorized proxy with access to
+that container's loopback namespace. Binding loopback inside the container does
+not expose a listener on its bridge IP. Native clients POST opaque binary data
+to `/quack`, expect `application/vnd.duckdb`, and put the Quack token in the
+binary connection message. The protocol does not support a URL path prefix;
+route by a dedicated hostname/port. A GET `/` banner is unauthenticated and is
+not proof of token validation or database readiness.
+
+The CLI capability descriptor establishes code support only. It cannot prove
+that a preinstalled, ABI-matched Quack extension exists or that a listener is
+running. Before making a connection option available, qualification must prove:
+correct-token access; wrong/missing-token denial; PG writes visible over Quack
+and Quack writes visible over PG; source/lake visibility; restart persistence;
+listener shutdown; and TLS/authenticated proxy routing. Do not mark a cloud
+endpoint ready based on the capability descriptor or banner alone.
+
+Set `quack.unix_proxy: true` only when a qualified host gateway is configured.
+It creates `<data_dir>/quack.sock` with mode 0600 in a clean absolute directory
+without symlinks, in the same process as the native listener. No arbitrary socket
+path is accepted. Existing files/sockets are never overwritten or deleted at
+startup; shutdown removes the socket only if its original inode still occupies
+that path. A stale socket requires explicit ownership verification and cleanup.
+Only POST `/quack` with no query string is forwarded. Request bodies are limited
+to 16 MiB, responses to 32 MiB, and concurrent upstream requests to four; upstream
+requests time out after 90 seconds. Oversized replies fail rather than truncate.
+Proxy failures use generic errors without logging tokens or payloads.
+The host gateway must authorize the database and validate its canonical mounted
+socket path and container generation before relaying bytes. Socket availability
+alone does not qualify native Quack authentication or prove a ready endpoint.
