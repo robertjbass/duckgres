@@ -49,6 +49,15 @@ func ProcessVersion() string { return processVersion }
 // passwordPattern matches password=<value> or password: <value> with quoted or unquoted values.
 var passwordPattern = regexp.MustCompile(`(?i)(password\s*[=:]\s*)("[^"]*"|[^\s"]+)`)
 
+// Object storage providers echo the rejected access key id back in their
+// error text (for example `Invalid Access Key: "<id>"`), and AWS style ids
+// can appear anywhere in a provider response.
+var (
+	invalidAccessKeyPattern = regexp.MustCompile(`(?i)(Invalid Access Key(?: Id)?:\s*")[^"]*(")`)
+	awsAccessKeyIDPattern   = regexp.MustCompile(`\b(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA|AIPA)[A-Z0-9]{16}\b`)
+	awsAccessKeyIDElement   = regexp.MustCompile(`(<AWSAccessKeyId>)[^<]*(</AWSAccessKeyId>)`)
+)
+
 var connectionsGauge = promauto.NewGauge(prometheus.GaugeOpts{
 	Name: "duckgres_connections_open",
 	Help: "Number of currently open client connections",
@@ -120,9 +129,13 @@ type BackendKey struct {
 
 // RedactSecrets replaces password=<value> (and password: <value>) patterns with
 // password=[REDACTED] for safe logging and error reporting. It handles both quoted
-// and unquoted values. It does not currently redact other secret types (tokens, keys).
+// and unquoted values. It also removes object storage access key ids that
+// provider errors echo back. It does not redact other token types.
 func RedactSecrets(s string) string {
-	return passwordPattern.ReplaceAllString(s, "${1}[REDACTED]")
+	s = passwordPattern.ReplaceAllString(s, "${1}[REDACTED]")
+	s = invalidAccessKeyPattern.ReplaceAllString(s, "${1}[REDACTED]${2}")
+	s = awsAccessKeyIDElement.ReplaceAllString(s, "${1}[REDACTED]${2}")
+	return awsAccessKeyIDPattern.ReplaceAllString(s, "[REDACTED]")
 }
 
 func redactConnectionString(connStr string) string {
