@@ -2,7 +2,7 @@ name: Account connector qualification (no publication)
 
 on:
   push:
-    branches: [feat/external-quack-qualification]
+    branches: [feat/external-quack-qualification, fix/file-mode-local-default-catalog]
   workflow_dispatch:
 
 permissions:
