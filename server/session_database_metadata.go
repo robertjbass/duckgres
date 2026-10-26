@@ -49,7 +49,12 @@ func InitSessionDatabaseMetadata(ctx context.Context, executor QueryExecutor, da
 		return fmt.Errorf("switch to memory catalog: %w", err)
 	}
 	defer func() {
-		if duckLakeAttached {
+		// File-persistence mode keeps the user's file as the default
+		// catalog even when DuckLake is attached: the lake is reached only
+		// as ducklake.*. Deferred calls run after the file catalog restore
+		// below, so selecting ducklake here would silently make it the
+		// session default and send unqualified names to lake storage.
+		if duckLakeAttached && restoreCatalog == "" {
 			_, _ = executor.ExecContext(context.Background(), "USE ducklake")
 			// USE ducklake resets search_path to ducklake.main, excluding memory.main
 			// where pg_catalog macros live. Restore it so macros remain resolvable.
