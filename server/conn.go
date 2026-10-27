@@ -311,7 +311,12 @@ func (c *clientConn) startDisconnectMonitor(ctx context.Context) (stop func()) {
 			want := c.reader.Buffered() + 1
 			if want > c.reader.Size() {
 				// The buffer is full of pipelined input; nothing more can be
-				// read without consuming it. Wait and look again.
+				// read without consuming it, so a later FIN is not seen here.
+				// Only a client that pipelines more than a buffer of messages
+				// behind a running statement gets here; a CancelRequest or
+				// pg_terminate_backend from another session still stops it.
+				// This is not a disk boundary: the same session could simply
+				// let its COPY run to the end. Wait and look again.
 				select {
 				case <-done:
 					return
