@@ -4659,3 +4659,29 @@ func TestClassifierCovers_PgCatalogViews(t *testing.T) {
 		})
 	}
 }
+
+// A COPY whose table reference gets rewritten is deparsed from the AST. The
+// PostgreSQL deparser only knows FORMAT csv/text/binary and used to emit an
+// empty FORMAT for parquet, json and xlsx.
+func TestTranspileCopyKeepsNonPostgresFormat(t *testing.T) {
+	tr := New(Config{DuckLakeMode: true, MacrosInMemoryCatalog: true, LogicalDatabaseName: "analytics", PhysicalCatalogName: "ducklake"})
+	cases := []struct{ in, want string }{
+		{`COPY (SELECT * FROM "ducklake"."main"."lk") TO '/tmp/x.parquet' (FORMAT parquet)`, `WITH ("FORMAT" parquet)`},
+		{`COPY (SELECT * FROM "ducklake"."main"."lk") TO '/tmp/x.parquet' (FORMAT 'PARQUET', COMPRESSION 'zstd')`, `WITH ("FORMAT" "PARQUET", compression zstd)`},
+		{`COPY (SELECT * FROM "ducklake"."main"."lk") TO '/tmp/x.xlsx' (FORMAT xlsx, HEADER true)`, `WITH ("FORMAT" xlsx, HEADER true)`},
+		{`COPY (SELECT * FROM "ducklake"."main"."lk") TO '/tmp/x.json' (FORMAT json)`, `json)`},
+		{`COPY (SELECT * FROM "ducklake"."main"."lk") TO '/tmp/x.csv' (FORMAT csv, HEADER true)`, `WITH (FORMAT CSV, HEADER true)`},
+	}
+	for _, tc := range cases {
+		result, err := tr.Transpile(tc.in)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.in, err)
+		}
+		if !strings.Contains(result.SQL, tc.want) {
+			t.Errorf("Transpile(%s) = %s, want it to contain %s", tc.in, result.SQL, tc.want)
+		}
+		if strings.Contains(result.SQL, "FORMAT )") || strings.Contains(result.SQL, "FORMAT ,") {
+			t.Errorf("Transpile(%s) dropped the FORMAT value: %s", tc.in, result.SQL)
+		}
+	}
+}
