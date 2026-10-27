@@ -7,6 +7,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -247,6 +249,108 @@ func TestCopyToFileThreePartNameKeepsFormat(t *testing.T) {
 		var n int
 		if err := conn.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s('%s')", tc.reader, path)).Scan(&n); err != nil || n != 1000 {
 			t.Fatalf("%s read back %d rows, err=%v", tc.file, n, err)
+		}
+	}
+}
+
+// A second session of the same user can find the COPY in pg_stat_activity
+// and end it with pg_terminate_backend, the backstop the Layerbase export
+// uses when a cancel through the pooler does not arrive.
+func TestCopyToFileTerminateBackendFromAnotherSession(t *testing.T) {
+	dir, connect := startCopyWireServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	conn := connect(ctx)
+	defer func() { _ = conn.Close(context.Background()) }()
+	admin := connect(ctx)
+	defer func() { _ = admin.Close(context.Background()) }()
+
+	out := filepath.Join(dir, "terminate.csv")
+	result := make(chan error, 1)
+	go func() {
+		_, err := conn.Exec(ctx, longCopyToFile(out))
+		result <- err
+	}()
+	waitForFileGrowth(t, out, 1<<20)
+
+	findCopyPid := func() (int32, bool) {
+		t.Helper()
+		rows, err := admin.Query(ctx, "SELECT pid, state, query FROM pg_stat_activity")
+		if err != nil {
+			t.Fatalf("pg_stat_activity: %v", err)
+		}
+		defer rows.Close()
+		var found int32
+		ok := false
+		for rows.Next() {
+			// Raw text values: the synthetic view's timestamp columns do not
+			// carry a zone, which pgx's timestamptz decoder rejects.
+			raw := rows.RawValues()
+			byName := map[string]string{}
+			for i, field := range rows.FieldDescriptions() {
+				byName[field.Name] = string(raw[i])
+			}
+			if strings.Contains(byName["query"], out) {
+				n, err := strconv.ParseInt(byName["pid"], 10, 32)
+				if err != nil {
+					t.Fatalf("pid %q: %v", byName["pid"], err)
+				}
+				found, ok = int32(n), true
+			}
+		}
+		return found, ok
+	}
+	pid, ok := findCopyPid()
+	if !ok {
+		t.Fatal("running COPY not listed in pg_stat_activity")
+	}
+
+	// Another user's session, or an unknown pid, is never signalled.
+	var signalled bool
+	if err := admin.QueryRow(ctx, "SELECT pg_terminate_backend(2147483000)").Scan(&signalled); err != nil || signalled {
+		t.Fatalf("unknown pid: signalled=%v err=%v", signalled, err)
+	}
+	if err := admin.QueryRow(ctx, fmt.Sprintf("SELECT pg_terminate_backend(%d)", pid)).Scan(&signalled); err != nil || !signalled {
+		t.Fatalf("pg_terminate_backend(%d): signalled=%v err=%v", pid, signalled, err)
+	}
+
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("terminated COPY reported success")
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatalf("COPY TO file survived pg_terminate_backend (file at %d bytes)", fileSize(out))
+	}
+	assertFileStopsGrowing(t, out, 5*time.Second)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, still := findCopyPid(); !still {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("terminated COPY still listed in pg_stat_activity")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func TestMatchPgSignalBackend(t *testing.T) {
+	for _, tc := range []struct {
+		query     string
+		terminate bool
+		pid       int32
+		ok        bool
+	}{
+		{"SELECT pg_terminate_backend(42)", true, 42, true},
+		{"select pg_catalog.pg_cancel_backend( 7 );", false, 7, true},
+		{"SELECT pg_terminate_backend(pid) FROM pg_stat_activity", false, 0, false},
+		{"SELECT pg_terminate_backend(42), 1", false, 0, false},
+		{"SELECT pg_terminate_backend(99999999999)", false, 0, false},
+	} {
+		terminate, pid, ok := matchPgSignalBackend(tc.query)
+		if ok != tc.ok || (ok && (terminate != tc.terminate || pid != tc.pid)) {
+			t.Errorf("matchPgSignalBackend(%q) = %v %d %v", tc.query, terminate, pid, ok)
 		}
 	}
 }

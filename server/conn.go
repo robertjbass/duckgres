@@ -1067,6 +1067,11 @@ func (c *clientConn) handleQuery(body []byte) error {
 		return c.handlePgStatActivity()
 	}
 
+	// pg_cancel_backend / pg_terminate_backend for a session of the same user.
+	if terminate, pid, ok := matchPgSignalBackend(query); ok {
+		return c.handlePgSignalBackend(pid, terminate)
+	}
+
 	// Passthrough mode: skip all transpilation, send query directly to DuckDB
 	if c.passthrough {
 		upperQuery := strings.ToUpper(query)
