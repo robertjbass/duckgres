@@ -354,3 +354,27 @@ func TestMatchPgSignalBackend(t *testing.T) {
 		}
 	}
 }
+
+// An extended-protocol client pipelines Sync right after Execute, so the
+// disconnect monitor always has a buffered byte. A dropped client must still
+// stop the COPY.
+func TestCopyToFileExtendedProtocolDisconnectWithPipelinedSync(t *testing.T) {
+	dir, connect := startCopyWireServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	conn := connect(ctx)
+
+	out := filepath.Join(dir, "extended-disconnect.csv")
+	go func() {
+		// ExecParams sends Parse, Bind, Describe, Execute and Sync together.
+		rr := conn.PgConn().ExecParams(ctx, longCopyToFile(out), nil, nil, nil, nil)
+		_, _ = rr.Close()
+	}()
+	waitForFileGrowth(t, out, 1<<20)
+	_ = conn.PgConn().Conn().Close()
+
+	assertFileStopsGrowing(t, out, 15*time.Second)
+	if size := fileSize(out); size > interruptedCopyCeiling {
+		t.Fatalf("extended COPY ran on after the disconnect: %d bytes written", size)
+	}
+}
