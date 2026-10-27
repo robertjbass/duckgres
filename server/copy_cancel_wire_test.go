@@ -16,9 +16,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// startCopyWireServer starts a real file-persistence listener with a local
-// DuckLake beside the file catalog, the layout the Layerbase account runtime
-// serves.
+// startCopyWireServer starts a real file-persistence listener, the layout the
+// stock Layerbase runtime serves.
 func startCopyWireServer(t *testing.T) (dir string, connect func(ctx context.Context) *pgx.Conn) {
 	t.Helper()
 	dir = t.TempDir()
@@ -37,10 +36,6 @@ func startCopyWireServer(t *testing.T) (dir string, connect func(ctx context.Con
 		TLSCertFile: cert, TLSKeyFile: key,
 		Users:   map[string]string{"layerbase": "fixture-password"},
 		Threads: 1, MemoryLimit: "256MB", ShutdownTimeout: time.Second,
-		DuckLake: DuckLakeConfig{
-			MetadataStore: filepath.Join(dir, "metadata.ducklake"),
-			DataPath:      filepath.Join(dir, "lake") + "/",
-		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -232,7 +227,7 @@ func TestCopyToFileThreePartNameKeepsFormat(t *testing.T) {
 	conn := connect(ctx)
 	defer func() { _ = conn.Close(context.Background()) }()
 
-	if _, err := conn.Exec(ctx, "CREATE TABLE ducklake.main.lk AS SELECT i AS id, 'v' || i::VARCHAR AS name FROM range(1000) t(i)"); err != nil {
+	if _, err := conn.Exec(ctx, "CREATE TABLE main.lk AS SELECT i AS id, 'v' || i::VARCHAR AS name FROM range(1000) t(i)"); err != nil {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct{ file, format, reader string }{
@@ -242,7 +237,7 @@ func TestCopyToFileThreePartNameKeepsFormat(t *testing.T) {
 		{"lk.csv", "FORMAT csv, HEADER true", "read_csv_auto"},
 	} {
 		path := filepath.Join(dir, tc.file)
-		stmt := fmt.Sprintf(`COPY (SELECT * FROM "ducklake"."main"."lk") TO '%s' (%s)`, path, tc.format)
+		stmt := fmt.Sprintf(`COPY (SELECT * FROM "layerbase"."main"."lk") TO '%s' (%s)`, path, tc.format)
 		if _, err := conn.Exec(ctx, stmt); err != nil {
 			t.Fatalf("%s: %v", stmt, err)
 		}
