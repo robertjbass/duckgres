@@ -365,6 +365,9 @@ type Server struct {
 	// DuckLake checkpoint scheduler
 	checkpointer *DuckLakeCheckpointer
 
+	// Reloads lake storage secrets when the shared credentials file changes.
+	credentialWatch *credentialWatch
+
 	// Progress lookup function for pg_stat_activity.
 	// In control plane mode, returns cached progress from worker health checks.
 	// Nil in standalone mode.
@@ -489,6 +492,8 @@ func New(cfg Config) (*Server, error) {
 		s.checkpointer = cp
 	}
 
+	s.startLakeCredentialWatch()
+
 	return s, nil
 }
 
@@ -535,6 +540,7 @@ func (s *Server) Close() error {
 	s.closeMu.Lock()
 	s.closed = true
 	s.closeMu.Unlock()
+	s.credentialWatch.stop()
 
 	// Quack ingress stops before waiting for PostgreSQL clients.
 	if err := s.stopQuackListener(); err != nil {
@@ -615,6 +621,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.closeMu.Lock()
 	s.closed = true
 	s.closeMu.Unlock()
+	s.credentialWatch.stop()
 
 	// Quack ingress stops before waiting for PostgreSQL clients.
 	if err := s.stopQuackListener(); err != nil {
