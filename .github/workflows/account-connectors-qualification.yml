@@ -2,7 +2,7 @@ name: Account connector qualification (no publication)
 
 on:
   push:
-    branches: [feat/external-quack-qualification, fix/file-mode-local-default-catalog]
+    branches: [feat/external-quack-qualification, fix/file-mode-local-default-catalog, feat/lake-credential-reload]
   workflow_dispatch:
 
 permissions:
