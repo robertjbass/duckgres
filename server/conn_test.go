@@ -1766,11 +1766,12 @@ func TestHandleExecuteAbortedRecoveryPreservesAlterViewFallback(t *testing.T) {
 
 	c.handleExecute(body.Bytes())
 
-	expectedExecCalls := []string{originalQuery, originalQuery, rewrittenQuery}
-	if !slices.Equal(executor.execCalls, expectedExecCalls) {
-		t.Fatalf("unexpected Exec calls: got %v want %v", executor.execCalls, expectedExecCalls)
+	// The portal runs on the cancelable query context, so every attempt and
+	// the recovery ROLLBACK go through ExecContext.
+	if len(executor.execCalls) != 0 {
+		t.Fatalf("unexpected context-free Exec calls: %v", executor.execCalls)
 	}
-	expectedExecContextCalls := []string{"ROLLBACK"}
+	expectedExecContextCalls := []string{originalQuery, "ROLLBACK", originalQuery, rewrittenQuery}
 	if !slices.Equal(executor.execCtxCalls, expectedExecContextCalls) {
 		t.Fatalf("unexpected ExecContext calls: got %v want %v", executor.execCtxCalls, expectedExecContextCalls)
 	}
@@ -1805,21 +1806,19 @@ func TestHandleExecuteRecoversAbortedAutocommitAlterViewFallback(t *testing.T) {
 	body := append([]byte{0}, make([]byte, 4)...)
 	c.handleExecute(body)
 
-	wantExec := []string{
+	// The portal runs on the cancelable query context, so every attempt and
+	// the recovery ROLLBACK go through ExecContext.
+	wantExecContext := []string{
 		"ALTER TABLE some_view RENAME TO renamed_view",
+		"ROLLBACK",
 		"ALTER TABLE some_view RENAME TO renamed_view",
 		"ALTER VIEW some_view RENAME TO renamed_view",
 	}
-	if len(exec.execContextQueries) != 1 || exec.execContextQueries[0] != "ROLLBACK" {
-		t.Fatalf("expected one rollback via ExecContext, got %v", exec.execContextQueries)
+	if len(exec.execQueries) != 0 {
+		t.Fatalf("unexpected context-free Exec calls: %v", exec.execQueries)
 	}
-	if len(exec.execQueries) != len(wantExec) {
-		t.Fatalf("expected exec sequence %v, got %v", wantExec, exec.execQueries)
-	}
-	for i, got := range exec.execQueries {
-		if got != wantExec[i] {
-			t.Fatalf("expected exec query %d to be %q, got %q", i, wantExec[i], got)
-		}
+	if !slices.Equal(exec.execContextQueries, wantExecContext) {
+		t.Fatalf("expected ExecContext sequence %v, got %v", wantExecContext, exec.execContextQueries)
 	}
 }
 

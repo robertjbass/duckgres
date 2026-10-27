@@ -16,8 +16,8 @@ type feedbackExecutor struct {
 	queryFn func(query string, args ...any) (RowSet, error)
 }
 
-func (e *feedbackExecutor) QueryContext(_ context.Context, _ string, _ ...any) (RowSet, error) {
-	return nil, errors.New("not implemented")
+func (e *feedbackExecutor) QueryContext(_ context.Context, query string, args ...any) (RowSet, error) {
+	return e.Query(query, args...)
 }
 
 func (e *feedbackExecutor) ExecContext(_ context.Context, _ string, _ ...any) (ExecResult, error) {
