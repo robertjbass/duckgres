@@ -24,6 +24,7 @@ import (
 type FileConfig struct {
 	Sources []server.SourceConfig `yaml:"sources"`
 	Quack   server.QuackConfig    `yaml:"quack"`
+	Sandbox server.SandboxConfig  `yaml:"sandbox"`
 
 	Host                      string              `yaml:"host"`
 	Port                      int                 `yaml:"port"`
@@ -451,6 +452,9 @@ func main() {
 	}
 	if len(cfg.Sources) > 0 && *mode != "standalone" {
 		fatal("sources prototype supports standalone mode only")
+	}
+	if cfg.Sandbox.Enabled && *mode != "standalone" {
+		fatal("sandbox supports standalone mode only")
 	}
 
 	// Handle --psql: launch psql connected to the local Duckgres server

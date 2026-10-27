@@ -190,6 +190,7 @@ type Config struct {
 	Extensions []string
 	Sources    []SourceConfig
 	Quack      QuackConfig
+	Sandbox    SandboxConfig
 
 	// DuckLake configuration
 	DuckLake DuckLakeConfig
@@ -376,6 +377,9 @@ type Server struct {
 
 func New(cfg Config) (*Server, error) {
 	if err := cfg.Quack.Validate(cfg.FilePersistence, cfg.DataDir, cfg.Users, cfg.ProcessIsolation, cfg.Port); err != nil {
+		return nil, err
+	}
+	if err := cfg.Sandbox.Validate(cfg); err != nil {
 		return nil, err
 	}
 	// Apply default rate limit config for any unset fields
@@ -1040,6 +1044,10 @@ func CreateDBConnection(cfg Config, duckLakeSem chan struct{}, username string, 
 		_ = db.Close()
 		return nil, err
 	}
+	if err := ApplySandbox(db, cfg); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 
 	return db, nil
 }
@@ -1244,6 +1252,10 @@ func CreatePassthroughDBConnection(cfg Config, duckLakeSem chan struct{}, userna
 			_ = db.Close()
 			return nil, fmt.Errorf("failed to set DuckLake as default: %w", err)
 		}
+	}
+	if err := ApplySandbox(db, cfg); err != nil {
+		_ = db.Close()
+		return nil, err
 	}
 
 	return db, nil

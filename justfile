@@ -436,5 +436,8 @@ test-sources *args:
 test-account-connectors:
     go test -count=1 -v -timeout=5m ./server -run 'TestQuackNative|TestExternalPostgresNative'
 
+test-plain-sandbox:
+    go test -count=1 -v -timeout=5m ./server -run 'TestSandbox'
+
 build-account-connector-tests:
     go test -c -o server.test ./server

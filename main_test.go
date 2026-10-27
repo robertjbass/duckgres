@@ -866,3 +866,14 @@ func TestSourceYAMLConfigResolution(t *testing.T) {
 		t.Fatal("source settings were not preserved")
 	}
 }
+
+func TestSandboxYAMLConfigResolution(t *testing.T) {
+	var cfg FileConfig
+	if err := yaml.Unmarshal([]byte("data_dir: \"/data/db\"\nfile_persistence: true\nsandbox:\n  enabled: true\n  allowed_directories:\n    - \"/data/db\"\n    - \"/tmp\"\n  preload_extensions:\n    - excel\n"), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	got := resolveEffectiveConfig(&cfg, configCLIInputs{}, envFromMap(nil), func(string) {}).Server.Sandbox
+	if !got.Enabled || len(got.AllowedDirectories) != 2 || got.AllowedDirectories[0] != "/data/db" || got.AllowedDirectories[1] != "/tmp" || len(got.PreloadExtensions) != 1 || got.PreloadExtensions[0] != "excel" {
+		t.Fatalf("sandbox settings were not preserved: %+v", got)
+	}
+}
