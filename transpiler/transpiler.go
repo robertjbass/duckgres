@@ -717,6 +717,33 @@ func fixupAST(tree *pg_query.ParseResult) {
 			// causing the deparser to emit "USING btree". Clear it.
 			idx.IndexStmt.AccessMethod = ""
 		}
+		if cp, ok := stmt.Stmt.Node.(*pg_query.Node_CopyStmt); ok && cp.CopyStmt != nil {
+			preserveCopyFormatOption(cp.CopyStmt)
+		}
+	}
+}
+
+// preserveCopyFormatOption keeps a COPY FORMAT the PostgreSQL deparser does
+// not know. The deparser only renders FORMAT csv, text and binary and emits
+// an empty "FORMAT" for anything else, so a rewritten COPY ... TO with
+// FORMAT parquet, json or xlsx reached DuckDB as "WITH (FORMAT )". Renaming
+// the option sends it down the deparser's generic path, which renders
+// "FORMAT" parquet; DuckDB matches COPY option names case-insensitively.
+func preserveCopyFormatOption(stmt *pg_query.CopyStmt) {
+	for _, opt := range stmt.Options {
+		def := opt.GetDefElem()
+		if def == nil || def.Defname != "format" {
+			continue
+		}
+		value := ""
+		if s := def.Arg.GetString_(); s != nil {
+			value = strings.ToLower(s.Sval)
+		}
+		switch value {
+		case "csv", "text", "binary":
+			continue
+		}
+		def.Defname = "FORMAT"
 	}
 }
 

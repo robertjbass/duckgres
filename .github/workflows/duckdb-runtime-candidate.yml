@@ -2,7 +2,7 @@ name: DuckDB runtime candidate
 
 on:
   push:
-    branches: [fix/duckdb-2-cloud-sql]
+    branches: [fix/duckdb-2-cloud-sql, fix/stock-copy-cancel]
   workflow_dispatch:
 
 permissions:
@@ -21,10 +21,10 @@ jobs:
         runtime:
           - duckdb: 1.5.6
             bindings: v0.10506.0
-            artifact_version: v0.1.7-layerbase
+            artifact_version: v0.1.8-layerbase
           - duckdb: 2.0.0
             bindings: v0.20000.0
-            artifact_version: v0.2.0-layerbase
+            artifact_version: v0.2.1-layerbase
     runs-on: ${{ matrix.platform.runner }}
     timeout-minutes: 30
     env:
@@ -70,6 +70,8 @@ jobs:
             echo "DuckDB ${{ matrix.runtime.duckdb }}: exit status $status. Duckgres never continues after an AppendRow error."
             echo 'The exact diagnostic log is retained with the candidate artifact. Actual wire rollback and persisted rows are separately required.'
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Verify COPY TO file stops on cancel, disconnect and pg_terminate_backend
+        run: just test-copy-cancel v${{ matrix.runtime.duckdb }}
       - name: Run unit tests
         run: just test-unit
       - name: Build candidate without publishing a release
@@ -77,6 +79,8 @@ jobs:
           just build-release "${{ matrix.runtime.artifact_version }}"
           mkdir -p candidate
           cp duckgres candidate/duckgres-linux-${{ matrix.platform.arch }}
+          ./duckgres --runtime-capabilities > candidate/capabilities.json
+          grep -q '"copy_cancel_v1":true' candidate/capabilities.json
           cp appender-diagnostic.txt candidate/
           go list -m all > candidate/dependencies.txt
           cp go.mod go.sum candidate/
