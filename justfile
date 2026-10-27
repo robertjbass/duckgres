@@ -414,6 +414,12 @@ test-appender-contract:
 test-cloud-sql expected="v1.5.6":
     DUCKGRES_EXPECTED_DUCKDB_VERSION={{expected}} go test -v -count=1 -p 1 -timeout 5m ./server -run '^TestDuckDBCloudSQL|^TestProfilingOutputToFile$'
 
+# COPY TO file must stop on a CancelRequest or a client disconnect, and keep
+# non-PostgreSQL FORMAT values when a three-part name forces a rewrite.
+[group('test')]
+test-copy-cancel expected="v1.5.6":
+    DUCKGRES_EXPECTED_DUCKDB_VERSION={{expected}} go test -v -count=1 -p 1 -timeout 5m ./server -run '^TestCopyToFile'
+
 # Focused COPY conversion and failed-transaction regression checks.
 [group('test')]
 test-copy-conversions expected="v1.5.6":

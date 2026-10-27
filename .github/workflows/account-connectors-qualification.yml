@@ -2,7 +2,7 @@ name: Account connector qualification (no publication)
 
 on:
   push:
-    branches: [feat/external-quack-qualification, fix/file-mode-local-default-catalog, feat/lake-credential-reload]
+    branches: [feat/external-quack-qualification, fix/file-mode-local-default-catalog, feat/lake-credential-reload, fix/copy-to-file-cancel]
   workflow_dispatch:
 
 permissions:
@@ -37,6 +37,9 @@ jobs:
           sha256sum "$DUCKGRES_QUALIFICATION_EXTENSIONS"/v2.0.0/linux_amd64/* > extension-checksums.txt
       - name: Native Quack authentication, shared instance and lifecycle
         run: just test-account-connectors
+      - name: COPY TO file cancel and disconnect on real DuckDB
+        if: ${{ !cancelled() }}
+        run: just test-copy-cancel v2.0.0
       - name: Compile native fixture executable
         if: ${{ !cancelled() }}
         run: just build-account-connector-tests
@@ -62,7 +65,7 @@ jobs:
           cp duckgres candidate/duckgres-linux-amd64
           ./duckgres --runtime-capabilities > candidate/capabilities.json
           printf '%s\n' '${{ github.sha }}' > candidate/source-commit.txt
-          printf '%s\n' '{"duckdb_version":"v2.0.0","bindings_version":"v0.20000.0","platform":"linux_amd64","external_postgres_v1":true,"quack_v1":true,"publication":false}' > candidate/qualification.json
+          printf '%s\n' '{"duckdb_version":"v2.0.0","bindings_version":"v0.20000.0","platform":"linux_amd64","external_postgres_v1":true,"quack_v1":true,"copy_cancel_v1":true,"publication":false}' > candidate/qualification.json
           cp extension-checksums.txt go.mod go.sum candidate/
           sha256sum candidate/duckgres-linux-amd64 > candidate/checksums.txt
       - uses: actions/upload-artifact@v4

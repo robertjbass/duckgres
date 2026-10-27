@@ -270,7 +270,9 @@ func (c *clientConn) queryContextInner(monitor bool) (context.Context, func()) {
 	}
 
 	var stopMonitor func()
-	if monitor {
+	// A connection without a socket reader (in-process harnesses) has
+	// nothing to monitor; cancel requests still reach the context.
+	if monitor && c.reader != nil && c.conn != nil {
 		stopMonitor = c.startDisconnectMonitor(ctx)
 	}
 
@@ -301,8 +303,31 @@ func (c *clientConn) startDisconnectMonitor(ctx context.Context) (stop func()) {
 	go func() {
 		defer close(stopped)
 		for {
+			// Ask for one byte MORE than is already buffered, so the read
+			// reaches the socket even when the client pipelined messages
+			// (an extended-protocol Sync after Execute): Peek(1) would be
+			// served from the buffer forever and never see FIN/RST. Bytes
+			// stay in the buffer for the message loop either way.
+			want := c.reader.Buffered() + 1
+			if want > c.reader.Size() {
+				// The buffer is full of pipelined input; nothing more can be
+				// read without consuming it, so a later FIN is not seen here.
+				// Only a client that pipelines more than a buffer of messages
+				// behind a running statement gets here; a CancelRequest or
+				// pg_terminate_backend from another session still stops it.
+				// This is not a disk boundary: the same session could simply
+				// let its COPY run to the end. Wait and look again.
+				select {
+				case <-done:
+					return
+				case <-ctx.Done():
+					return
+				case <-time.After(50 * time.Millisecond):
+					continue
+				}
+			}
 			_ = c.conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
-			_, err := c.reader.Peek(1)
+			_, err := c.reader.Peek(want)
 			if err != nil {
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 					select {
@@ -318,9 +343,8 @@ func (c *clientConn) startDisconnectMonitor(ctx context.Context) (stop func()) {
 				c.cancel()
 				return
 			}
-			// Data available (e.g. pipelined Sync message) — safe in the
-			// bufio.Reader buffer. Throttle to avoid busy-waiting since
-			// Peek returns instantly when data is already buffered.
+			// More data arrived (another pipelined message): it is safe in
+			// the bufio.Reader buffer. Throttle before looking again.
 			select {
 			case <-done:
 				return
@@ -1063,6 +1087,11 @@ func (c *clientConn) handleQuery(body []byte) error {
 	// Intercept pg_stat_activity queries. Return synthetic results from the connection registry.
 	if matchPgStatActivityQuery(query) {
 		return c.handlePgStatActivity()
+	}
+
+	// pg_cancel_backend / pg_terminate_backend for a session of the same user.
+	if terminate, pid, ok := matchPgSignalBackend(query); ok {
+		return c.handlePgSignalBackend(pid, terminate)
 	}
 
 	// Passthrough mode: skip all transpilation, send query directly to DuckDB
@@ -1935,6 +1964,11 @@ func (c *clientConn) executeMultiStatement(statements []string, cleanup []string
 		return nil
 	}
 
+	// The rewritten statements run on the query context so a CancelRequest
+	// or a client disconnect interrupts them. Cleanup stays uncancelable.
+	queryCtx, queryCleanup := c.queryContext()
+	defer queryCleanup()
+
 	// Check if we're adding our own transaction wrapper
 	hasOurTransaction := len(statements) >= 2 &&
 		strings.ToUpper(strings.TrimSpace(statements[0])) == "BEGIN" &&
@@ -1951,7 +1985,7 @@ func (c *clientConn) executeMultiStatement(statements []string, cleanup []string
 	for i := 0; i < len(statements)-1; i++ {
 		stmt := statements[i]
 		slog.Debug("Multi-stmt setup.", "user", c.username, "step", i+1, "total", len(statements)-1, "stmt", stmt)
-		_, err := c.executor.Exec(stmt)
+		_, err := c.executor.ExecContext(queryCtx, stmt)
 		if err != nil {
 			slog.Error("Multi-stmt setup error.", "user", c.username, "query", stmt, "error", err)
 			c.setTxError()
@@ -1972,7 +2006,7 @@ func (c *clientConn) executeMultiStatement(statements []string, cleanup []string
 
 	if queryReturnsResults(finalStmt) {
 		// Result-returning query: obtain cursor FIRST, cleanup SECOND, stream THIRD
-		rows, err := c.executor.Query(finalStmt)
+		rows, err := c.executor.QueryContext(queryCtx, finalStmt)
 		if err != nil {
 			slog.Error("Multi-stmt final query error.", "user", c.username, "query", finalStmt, "error", err)
 			c.setTxError()
@@ -1993,7 +2027,7 @@ func (c *clientConn) executeMultiStatement(statements []string, cleanup []string
 
 	} else {
 		// Non-result query (DML without RETURNING, DDL, etc.): execute then cleanup
-		result, err := c.executor.Exec(finalStmt)
+		result, err := c.executor.ExecContext(queryCtx, finalStmt)
 		if err != nil {
 			slog.Error("Multi-stmt final exec error.", "user", c.username, "query", finalStmt, "error", err)
 			c.setTxError()
@@ -2037,6 +2071,11 @@ func (c *clientConn) executeMultiStatementExtended(statements []string, cleanup 
 		return
 	}
 
+	// The rewritten statements run on the query context so a CancelRequest
+	// or a client disconnect interrupts them. Cleanup stays uncancelable.
+	queryCtx, queryCleanup := c.queryContext()
+	defer queryCleanup()
+
 	// Check if we're adding our own transaction wrapper
 	hasOurTransaction := len(statements) >= 2 &&
 		strings.ToUpper(strings.TrimSpace(statements[0])) == "BEGIN" &&
@@ -2053,7 +2092,7 @@ func (c *clientConn) executeMultiStatementExtended(statements []string, cleanup 
 	for i := 0; i < len(statements)-1; i++ {
 		stmt := statements[i]
 		slog.Debug("Multi-stmt-ext setup.", "user", c.username, "step", i+1, "total", len(statements)-1, "stmt", stmt)
-		_, err := c.executor.Exec(stmt, args...)
+		_, err := c.executor.ExecContext(queryCtx, stmt, args...)
 		if err != nil {
 			slog.Error("Multi-stmt-ext setup error.", "user", c.username, "query", stmt, "error", err)
 			c.setTxError()
@@ -2072,7 +2111,7 @@ func (c *clientConn) executeMultiStatementExtended(statements []string, cleanup 
 
 	if queryReturnsResults(finalStmt) {
 		// Result-returning query: obtain cursor FIRST, cleanup SECOND, stream THIRD
-		rows, err := c.executor.Query(finalStmt, args...)
+		rows, err := c.executor.QueryContext(queryCtx, finalStmt, args...)
 		if err != nil {
 			slog.Error("Multi-stmt-ext final query error.", "user", c.username, "query", finalStmt, "error", err)
 			c.setTxError()
@@ -2090,7 +2129,7 @@ func (c *clientConn) executeMultiStatementExtended(statements []string, cleanup 
 
 	} else {
 		// Non-result query (DML without RETURNING, DDL, etc.): execute then cleanup
-		result, err := c.executor.Exec(finalStmt, args...)
+		result, err := c.executor.ExecContext(queryCtx, finalStmt, args...)
 		if err != nil {
 			slog.Error("Multi-stmt-ext final exec error.", "user", c.username, "query", finalStmt, "error", err)
 			c.setTxError()
@@ -3120,12 +3159,23 @@ func (c *clientConn) handleCopy(query, upperQuery string) error {
 		return c.handleCopyIn(query, upperQuery)
 	}
 
-	// For other COPY commands (e.g., COPY TO file), pass through to DuckDB
-	result, err := c.executor.Exec(query)
+	// For other COPY commands (e.g., COPY TO file), pass through to DuckDB.
+	// The statement runs on the query context so a CancelRequest or a client
+	// disconnect interrupts it: a COPY TO file can write for a long time, and
+	// an orphaned one keeps filling the disk after the client is gone. This
+	// path never reads from c.reader, so the disconnect monitor is safe here.
+	ctx, cleanup := c.queryContext()
+	defer cleanup()
+	result, err := c.executor.ExecContext(ctx, query)
 	if err != nil {
-		c.sendError("ERROR", "42000", err.Error())
+		errCode := classifyErrorCode(err)
+		errMsg := err.Error()
+		if isQueryCancelled(err) {
+			errMsg = "canceling statement due to user request"
+		}
+		c.sendError("ERROR", errCode, errMsg)
 		c.setTxError()
-		c.logQuery(start, query, query, "COPY", 0, 0, "42000", err.Error(), "simple")
+		c.logQuery(start, query, query, "COPY", 0, 0, errCode, errMsg, "simple")
 		_ = writeReadyForQuery(c.writer, c.txStatus)
 		_ = c.writer.Flush()
 		return nil
@@ -3172,13 +3222,23 @@ func (c *clientConn) handleCopyOut(query, upperQuery string) error {
 		}
 	}
 
-	// Execute the query
-	rows, err := c.executor.Query(selectQuery)
+	// Execute the query on the query context so a CancelRequest or a client
+	// disconnect stops it. Streaming only writes to the client, so the
+	// disconnect monitor does not race with a reader here.
+	ctx, cleanup := c.queryContext()
+	defer cleanup()
+	rows, err := c.executor.QueryContext(ctx, selectQuery)
 	if err != nil {
-		slog.Error("COPY TO query failed.", "user", c.username, "query", selectQuery, "error", err)
-		c.sendError("ERROR", "42000", err.Error())
+		errCode := classifyErrorCode(err)
+		errMsg := err.Error()
+		if isQueryCancelled(err) {
+			errMsg = "canceling statement due to user request"
+		} else {
+			slog.Error("COPY TO query failed.", "user", c.username, "query", selectQuery, "error", err)
+		}
+		c.sendError("ERROR", errCode, errMsg)
 		c.setTxError()
-		c.logQuery(start, query, query, "COPY", 0, 0, "42000", err.Error(), "simple")
+		c.logQuery(start, query, query, "COPY", 0, 0, errCode, errMsg, "simple")
 		_ = writeReadyForQuery(c.writer, c.txStatus)
 		_ = c.writer.Flush()
 		return nil
@@ -3561,13 +3621,23 @@ func (c *clientConn) handleCopyIn(query, upperQuery string) error {
 			slog.Debug("COPY FROM STDIN executing native DuckDB COPY.", "user", c.username, "sql", copySQL)
 			loadStart := time.Now()
 
-			result, err := c.executor.Exec(copySQL)
+			// Cancelable without the disconnect monitor: this handler owns
+			// c.reader for the whole COPY FROM STDIN exchange.
+			loadCtx, loadCleanup := c.queryContextForCursor()
+			result, err := c.executor.ExecContext(loadCtx, copySQL)
+			loadCleanup()
 			if err != nil {
-				slog.Error("COPY FROM STDIN DuckDB COPY failed.", "user", c.username, "error", err)
+				errCode := "22P02"
 				errMsg := fmt.Sprintf("COPY failed: %v", err)
-				c.sendError("ERROR", "22P02", errMsg)
+				if isQueryCancelled(err) {
+					errCode = "57014"
+					errMsg = "canceling statement due to user request"
+				} else {
+					slog.Error("COPY FROM STDIN DuckDB COPY failed.", "user", c.username, "error", err)
+				}
+				c.sendError("ERROR", errCode, errMsg)
 				c.setTxError()
-				c.logQuery(copyStartTime, query, query, "COPY", 0, int64(rowCount), "22P02", errMsg, "simple")
+				c.logQuery(copyStartTime, query, query, "COPY", 0, int64(rowCount), errCode, errMsg, "simple")
 				_ = writeReadyForQuery(c.writer, c.txStatus)
 				_ = c.writer.Flush()
 				return nil
@@ -5172,6 +5242,13 @@ func (c *clientConn) handleExecute(body []byte) {
 	originalQuery := p.stmt.query
 	convertedQuery := p.stmt.convertedQuery
 
+	// Run the portal on the query context so a CancelRequest or a client
+	// disconnect interrupts it (a COPY TO file or a long scan included). The
+	// result is fully streamed inside this call, so the context never has to
+	// outlive it.
+	ctx, cleanup := c.queryContext()
+	defer cleanup()
+
 	if !returnsResults {
 		// Handle nested BEGIN: PostgreSQL issues a warning but continues,
 		// while DuckDB throws an error. Match PostgreSQL behavior.
@@ -5183,18 +5260,18 @@ func (c *clientConn) handleExecute(body []byte) {
 
 		// Non-result-returning query: use Exec with converted query
 		runExec := func() (ExecResult, error) {
-			result, err := c.executor.Exec(convertedQuery, args...)
+			result, err := c.executor.ExecContext(ctx, convertedQuery, args...)
 			if err != nil {
 				// Retry ALTER TABLE as ALTER VIEW if target is a view
 				if isAlterTableNotTableError(err) {
 					if alteredQuery, ok := transpiler.ConvertAlterTableToAlterView(convertedQuery); ok {
-						return c.executor.Exec(alteredQuery, args...)
+						return c.executor.ExecContext(ctx, alteredQuery, args...)
 					}
 				}
 				// Retry DROP TABLE as DROP VIEW if target is a view
 				if isDropTableOnViewError(err) {
 					if alteredQuery, ok := transpiler.ConvertDropTableToDropView(convertedQuery); ok {
-						return c.executor.Exec(alteredQuery, args...)
+						return c.executor.ExecContext(ctx, alteredQuery, args...)
 					}
 				}
 			}
@@ -5245,7 +5322,7 @@ func (c *clientConn) handleExecute(body []byte) {
 
 	// Result-returning query: use Query with converted query
 	runQuery := func() (RowSet, error) {
-		return c.executor.Query(convertedQuery, args...)
+		return c.executor.QueryContext(ctx, convertedQuery, args...)
 	}
 
 	rows, err := runQuery()

@@ -13,7 +13,7 @@ func TestRuntimeCapabilities(t *testing.T) {
 	if err := json.Unmarshal([]byte(runtimeCapabilitiesJSON()), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.SchemaVersion != 1 || !got.Features["external_postgres_v1"] || !got.Features["quack_v1"] {
+	if got.SchemaVersion != 1 || !got.Features["external_postgres_v1"] || !got.Features["quack_v1"] || !got.Features["copy_cancel_v1"] {
 		t.Fatalf("unexpected capabilities: %+v", got)
 	}
 }
