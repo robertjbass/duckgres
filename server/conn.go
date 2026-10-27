@@ -303,8 +303,26 @@ func (c *clientConn) startDisconnectMonitor(ctx context.Context) (stop func()) {
 	go func() {
 		defer close(stopped)
 		for {
+			// Ask for one byte MORE than is already buffered, so the read
+			// reaches the socket even when the client pipelined messages
+			// (an extended-protocol Sync after Execute): Peek(1) would be
+			// served from the buffer forever and never see FIN/RST. Bytes
+			// stay in the buffer for the message loop either way.
+			want := c.reader.Buffered() + 1
+			if want > c.reader.Size() {
+				// The buffer is full of pipelined input; nothing more can be
+				// read without consuming it. Wait and look again.
+				select {
+				case <-done:
+					return
+				case <-ctx.Done():
+					return
+				case <-time.After(50 * time.Millisecond):
+					continue
+				}
+			}
 			_ = c.conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
-			_, err := c.reader.Peek(1)
+			_, err := c.reader.Peek(want)
 			if err != nil {
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 					select {
@@ -320,9 +338,8 @@ func (c *clientConn) startDisconnectMonitor(ctx context.Context) (stop func()) {
 				c.cancel()
 				return
 			}
-			// Data available (e.g. pipelined Sync message) — safe in the
-			// bufio.Reader buffer. Throttle to avoid busy-waiting since
-			// Peek returns instantly when data is already buffered.
+			// More data arrived (another pipelined message): it is safe in
+			// the bufio.Reader buffer. Throttle before looking again.
 			select {
 			case <-done:
 				return
