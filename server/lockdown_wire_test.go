@@ -109,14 +109,27 @@ func TestFileLockdownOverWire(t *testing.T) {
 	if tag.RowsAffected() != 2 {
 		t.Fatalf("COPY FROM STDIN rows = %d, want 2", tag.RowsAffected())
 	}
-	entries, err := os.ReadDir(exchange)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), "duckgres-copy-") {
-			t.Errorf("COPY FROM STDIN left %s behind", entry.Name())
+	// The staging file is removed when the COPY handler returns, which can be
+	// just after the client already has its CommandComplete.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		left := ""
+		entries, err := os.ReadDir(exchange)
+		if err != nil {
+			t.Fatal(err)
 		}
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), "duckgres-copy-") {
+				left = entry.Name()
+			}
+		}
+		if left == "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("COPY FROM STDIN left %s behind", left)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
