@@ -3556,7 +3556,7 @@ func (c *clientConn) handleCopyIn(query, upperQuery string) error {
 	// Create temp file upfront and stream data directly to it (avoids memory buffering)
 	// This approach leverages DuckDB's highly optimized CSV parser which handles
 	// type conversions automatically and can load millions of rows in seconds.
-	tmpFile, err := os.CreateTemp("", "duckgres-copy-*.csv")
+	tmpFile, err := os.CreateTemp(copyStagingDir(c.server.cfg), "duckgres-copy-*.csv")
 	if err != nil {
 		slog.Error("COPY FROM STDIN failed to create temp file.", "user", c.username, "error", err)
 		errMsg := fmt.Sprintf("failed to create temp file: %v", err)

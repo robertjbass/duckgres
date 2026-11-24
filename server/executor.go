@@ -103,7 +103,7 @@ func (e *LocalExecutor) Close() error {
 }
 
 func (e *LocalExecutor) LastProfilingOutput() string {
-	data, err := os.ReadFile("/tmp/duckgres-profiling.json")
+	data, err := os.ReadFile(currentProfilingOutput())
 	if err != nil {
 		return ""
 	}
@@ -175,7 +175,7 @@ func (e *PinnedExecutor) Close() error {
 }
 
 func (e *PinnedExecutor) LastProfilingOutput() string {
-	data, err := os.ReadFile("/tmp/duckgres-profiling.json")
+	data, err := os.ReadFile(currentProfilingOutput())
 	if err != nil {
 		return ""
 	}

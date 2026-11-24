@@ -2,7 +2,7 @@ name: DuckDB runtime candidate
 
 on:
   push:
-    branches: [fix/duckdb-2-cloud-sql, fix/stock-copy-cancel]
+    branches: [fix/duckdb-2-cloud-sql, fix/stock-copy-cancel, feat/c823-extension-lockdown-stock]
   workflow_dispatch:
 
 permissions:
@@ -21,10 +21,10 @@ jobs:
         runtime:
           - duckdb: 1.5.6
             bindings: v0.10506.0
-            artifact_version: v0.1.8-layerbase
+            artifact_version: v0.1.9-layerbase
           - duckdb: 2.0.0
             bindings: v0.20000.0
-            artifact_version: v0.2.1-layerbase
+            artifact_version: v0.2.2-layerbase
     runs-on: ${{ matrix.platform.runner }}
     timeout-minutes: 30
     env:
@@ -81,6 +81,7 @@ jobs:
           cp duckgres candidate/duckgres-linux-${{ matrix.platform.arch }}
           ./duckgres --runtime-capabilities > candidate/capabilities.json
           grep -q '"copy_cancel_v1":true' candidate/capabilities.json
+          grep -q '"file_lockdown_v1":true' candidate/capabilities.json
           cp appender-diagnostic.txt candidate/
           go list -m all > candidate/dependencies.txt
           cp go.mod go.sum candidate/
