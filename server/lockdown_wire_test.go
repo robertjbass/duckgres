@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"strings"
@@ -166,4 +167,55 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 	_ = os.RemoveAll(root)
 	os.Exit(code)
+}
+
+// Persistent secrets created before the lockdown live in DuckDB's default
+// secret directory; the lockdown moves the directory, so they must be copied
+// over or queries that rely on them fail after the upgrade.
+func TestFileLockdownKeepsExistingPersistentSecrets(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	legacy := filepath.Join(home, ".duckdb", "stored_secrets")
+	seed, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		"SET secret_directory = '" + legacy + "'",
+		"CREATE PERSISTENT SECRET legacy_s3 (TYPE s3, KEY_ID 'fixture-key', SECRET 'fixture-secret', SCOPE 's3://legacy-bucket')",
+	} {
+		if _, err := seed.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = seed.Close()
+	outside := filepath.Join(t.TempDir(), "outside.duckdb_secret")
+	if err := os.WriteFile(outside, []byte("not a secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(legacy, "planted.duckdb_secret")); err != nil {
+		t.Fatal(err)
+	}
+
+	dir, connect := startCopyWireServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	conn := connect(ctx)
+	defer func() { _ = conn.Close(context.Background()) }()
+
+	var name string
+	if err := conn.QueryRow(ctx, "SELECT name FROM which_secret('s3://legacy-bucket/x.parquet', 's3')").Scan(&name); err != nil || name != "legacy_s3" {
+		t.Fatalf("legacy secret after the lockdown: name=%q err=%v", name, err)
+	}
+	copied := filepath.Join(fileSecretDir(dir), "legacy_s3.duckdb_secret")
+	info, err := os.Lstat(copied)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		t.Fatalf("copied secret: %v %v", info, err)
+	}
+	if _, err := os.Lstat(filepath.Join(fileSecretDir(dir), "planted.duckdb_secret")); !os.IsNotExist(err) {
+		t.Fatalf("a symlinked secret was copied: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(legacy, "legacy_s3.duckdb_secret")); err != nil {
+		t.Fatalf("the legacy secret must stay in place: %v", err)
+	}
 }
