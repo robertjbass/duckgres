@@ -2,12 +2,15 @@ package server
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 )
 
 // File-persistence databases serve one customer's DuckDB file over the
@@ -168,6 +171,18 @@ func prepareFileLockdownDirs(db *sql.DB, cfg Config) error {
 			return fmt.Errorf("create %s: %w", dir, err)
 		}
 	}
+	var legacySecrets string
+	if err := db.QueryRow("SELECT current_setting('secret_directory')").Scan(&legacySecrets); err != nil {
+		return fmt.Errorf("read secret_directory: %w", err)
+	}
+	copied, skipped, err := copyPersistentSecrets(legacySecrets, fileSecretDir(cfg.DataDir))
+	if err != nil {
+		// The database still serves; only secrets that were not copied are
+		// missing, and the next start retries.
+		slog.Warn("Could not copy every existing persistent secret into the database's secret directory.", "copied", copied, "skipped", skipped, "error", err)
+	} else if copied > 0 || skipped > 0 {
+		slog.Info("Copied existing persistent secrets into the database's secret directory.", "copied", copied, "skipped", skipped)
+	}
 	if _, err := db.Exec("SET secret_directory = " + quoteSQLStringLiteral(fileSecretDir(cfg.DataDir))); err != nil {
 		return fmt.Errorf("set secret_directory: %w", err)
 	}
@@ -218,4 +233,74 @@ func applyFileLockdown(db *sql.DB, cfg Config) error {
 		return fmt.Errorf("file lockdown did not take effect (external=%s community=%s unsigned=%s)", external, community, unsigned)
 	}
 	return nil
+}
+
+// copyPersistentSecrets copies the persistent secrets DuckDB stored in its
+// default directory before the lockdown into the database's own secret
+// directory, so queries that use them keep working. It copies, never moves
+// (the old directory may be shared by other databases in the container), skips
+// symlinks and anything that is not a regular *.duckdb_secret file, never
+// overwrites a secret already in the destination, and writes 0600. Only counts
+// are reported: secret names and contents are never logged.
+func copyPersistentSecrets(src, dst string) (copied, skipped int, err error) {
+	if src == "" || filepath.Clean(src) == filepath.Clean(dst) {
+		return 0, 0, nil
+	}
+	info, err := os.Lstat(src)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, 0, nil
+		}
+		return 0, 0, err
+	}
+	if !info.IsDir() {
+		return 0, 0, nil
+	}
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return 0, 0, err
+	}
+	var errs []error
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".duckdb_secret") || !entry.Type().IsRegular() {
+			skipped++
+			continue
+		}
+		if err := copySecretFile(filepath.Join(src, name), filepath.Join(dst, name)); err != nil {
+			if errors.Is(err, os.ErrExist) {
+				skipped++
+				continue
+			}
+			errs = append(errs, err)
+			continue
+		}
+		copied++
+	}
+	return copied, skipped, errors.Join(errs...)
+}
+
+func copySecretFile(src, dst string) error {
+	in, err := os.OpenFile(src, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+	if info, err := in.Stat(); err != nil || !info.Mode().IsRegular() {
+		return fmt.Errorf("persistent secret is not a regular file")
+	}
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		_ = os.Remove(dst)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(dst)
+		return err
+	}
+	return os.Chmod(dst, 0o600)
 }
