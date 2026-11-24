@@ -113,6 +113,15 @@ func withTrailingSlash(dir string) string {
 	return dir + "/"
 }
 
+// localLakeDataPath is the local DuckLake data directory, or "" when the lake
+// stores its files in object storage (allowed by the remote prefixes).
+func localLakeDataPath(cfg Config) string {
+	if cfg.DuckLake.MetadataStore == "" || cfg.DuckLake.ObjectStore != "" || cfg.DuckLake.DataPath == "" {
+		return ""
+	}
+	return filepath.Clean(cfg.DuckLake.DataPath)
+}
+
 func lockdownAllowedDirectories(cfg Config) []string {
 	dirs := []string{
 		withTrailingSlash(FileExchangeDir(cfg.DataDir)),
@@ -120,8 +129,8 @@ func lockdownAllowedDirectories(cfg Config) []string {
 		withTrailingSlash(fileSecretDir(cfg.DataDir)),
 		withTrailingSlash(fileTempDir(cfg.DataDir)),
 	}
-	if cfg.DuckLake.MetadataStore != "" && cfg.DuckLake.ObjectStore == "" && cfg.DuckLake.DataPath != "" {
-		dirs = append(dirs, withTrailingSlash(filepath.Clean(cfg.DuckLake.DataPath)))
+	if lake := localLakeDataPath(cfg); lake != "" {
+		dirs = append(dirs, withTrailingSlash(lake))
 	}
 	return append(dirs, lockdownRemotePrefixes...)
 }
@@ -148,7 +157,13 @@ func sqlStringList(values []string) string {
 // allows and points secrets at the database's own directory, before any
 // extension or secret is used.
 func prepareFileLockdownDirs(db *sql.DB, cfg Config) error {
-	for _, dir := range []string{FileExchangeDir(cfg.DataDir), fileSecretDir(cfg.DataDir), fileTempDir(cfg.DataDir)} {
+	dirs := []string{FileExchangeDir(cfg.DataDir), fileSecretDir(cfg.DataDir), fileTempDir(cfg.DataDir)}
+	if lake := localLakeDataPath(cfg); lake != "" {
+		// DuckLake creates table directories under its data path but, once
+		// the lockdown is on, cannot create the data path itself.
+		dirs = append(dirs, lake)
+	}
+	for _, dir := range dirs {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("create %s: %w", dir, err)
 		}
