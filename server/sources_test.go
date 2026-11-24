@@ -68,22 +68,23 @@ func TestSourceValidation(t *testing.T) {
 type sourceRecorder struct {
 	queries []string
 	failAt  int
+	// failPrefix fails every statement starting with it.
+	failPrefix string
 }
 
 func (r *sourceRecorder) ExecContext(_ context.Context, q string, _ ...any) (sql.Result, error) {
 	r.queries = append(r.queries, q)
-	if r.failAt == len(r.queries) {
+	if r.failAt == len(r.queries) || (r.failPrefix != "" && strings.HasPrefix(q, r.failPrefix)) {
 		return nil, errors.New("password=PRIVATE_SECRET SQL=" + q)
 	}
 	return nil, nil
 }
 func TestSourceBootstrap(t *testing.T) {
 	s := SourceConfig{Name: "app", Type: "postgres", Host: "db", Port: 5432, Database: "app", User: "reader", Password: "PRIVATE_SECRET"}
-	for _, failAt := range []int{1, 2, 3} {
-		r := &sourceRecorder{failAt: failAt}
+	for _, r := range []*sourceRecorder{{failAt: 2}, {failPrefix: "LOAD"}, {failPrefix: "INSTALL", failAt: 1}} {
 		err := attachSources(r, []SourceConfig{s}, sourceAbsent)
 		if err == nil || strings.Contains(err.Error(), "PRIVATE_SECRET") || strings.Contains(err.Error(), "password=") {
-			t.Fatalf("unsafe bootstrap error: %v", err)
+			t.Fatalf("unsafe bootstrap error after %v: %v", r.queries, err)
 		}
 	}
 	r := &sourceRecorder{}
@@ -92,8 +93,17 @@ func TestSourceBootstrap(t *testing.T) {
 	if err := attachSources(r, []SourceConfig{s, s2}, sourceAbsent); err != nil {
 		t.Fatal(err)
 	}
-	if len(r.queries) != 4 || r.queries[0] != "INSTALL postgres" || r.queries[1] != "LOAD postgres" {
+	// An already installed extension loads without INSTALL, which the file
+	// lockdown refuses.
+	if len(r.queries) != 3 || r.queries[0] != "LOAD postgres" {
 		t.Fatalf("unexpected bootstrap order: %v", r.queries)
+	}
+	r = &sourceRecorder{failAt: 1}
+	if err := attachSources(r, []SourceConfig{s}, sourceAbsent); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.queries) != 4 || r.queries[1] != "INSTALL postgres" || r.queries[2] != "LOAD postgres" {
+		t.Fatalf("missing extension must be installed then loaded: %v", r.queries)
 	}
 	for _, sources := range [][]SourceConfig{{s, s}, {s, {Name: "bad-name"}}} {
 		r := &sourceRecorder{}
@@ -142,7 +152,7 @@ func TestSourceExistingCatalogVerification(t *testing.T) {
 		if !mismatch && err != nil {
 			t.Fatal(err)
 		}
-		if len(r.queries) != 2 {
+		if len(r.queries) != 1 {
 			t.Fatal("existing catalog was reattached")
 		}
 	}
