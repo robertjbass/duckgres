@@ -268,6 +268,27 @@ extensions:
   - postgres    # PostgreSQL scanner
 ```
 
+### File-persistence lockdown
+
+With `file_persistence: true` and a `data_dir`, every database is locked down
+before it serves any client SQL. There is no option to turn this off.
+
+- Only DuckDB-signed extensions load (`allow_unsigned_extensions` stays at its
+  default, `false`). Community extensions, extension autoinstall and autoload
+  are off.
+- `httpfs` and `excel` are loaded at startup (seeded from `/app/extensions` or
+  the Layerbase extension store, installed from the core repository as a
+  fallback). Nothing else can be installed or loaded afterwards.
+- `enable_external_access` is off. Client SQL reads and writes files only in
+  the database's own exchange directory (`/tmp/duckgres-exchange/<data dir
+  name>/`), its `extensions/`, `secrets/` and `tmp/` directories, a local
+  DuckLake `data_path`, and remote `http(s)://`, `s3://`, `r2://`, `gcs://`
+  and `hf://` URLs. The data directory root (TLS key, `duckgres.yaml`, lake
+  credentials) is not readable. Persistent secrets live in `<data_dir>/secrets`.
+- DuckDB refuses to turn any of this back on while the database runs, so
+  `lock_configuration` is not set; ordinary session `SET`s keep working.
+- `--runtime-capabilities` advertises `file_lockdown_v1`.
+
 ## DuckLake Integration
 
 DuckLake provides a SQL-based lakehouse format. When configured, the DuckLake catalog is automatically attached on connection:

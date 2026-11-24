@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/netip"
 	"path/filepath"
@@ -204,6 +205,10 @@ type sourceExecer interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 }
 
+// errInvalidSourceConfig marks a source list that is wrong in itself, as
+// opposed to one that could not be attached right now.
+var errInvalidSourceConfig = errors.New("invalid source configuration")
+
 func AttachSources(db *sql.DB, sources []SourceConfig) error {
 	return attachSources(db, sources, func(ctx context.Context, s SourceConfig, dsn string) (bool, error) {
 		var total, matching int
@@ -221,11 +226,11 @@ func attachSources(db sourceExecer, sources []SourceConfig, exists func(context.
 	for i, s := range sources {
 		q, err := sourceAttachSQL(s)
 		if err != nil {
-			return fmt.Errorf("invalid source configuration at index %d: %w", i, err)
+			return fmt.Errorf("%w at index %d: %w", errInvalidSourceConfig, i, err)
 		}
 		key := strings.ToLower(s.Name)
 		if names[key] {
-			return fmt.Errorf("duplicate source alias at index %d", i)
+			return fmt.Errorf("%w: duplicate source alias at index %d", errInvalidSourceConfig, i)
 		}
 		names[key] = true
 		statements[i] = q
@@ -237,9 +242,14 @@ func attachSources(db sourceExecer, sources []SourceConfig, exists func(context.
 	loaded := make(map[string]bool)
 	for i, s := range sources {
 		if !loaded[s.Type] {
-			for _, q := range []string{"INSTALL " + s.Type, "LOAD " + s.Type} {
-				if _, err := db.ExecContext(ctx, q); err != nil {
-					return fmt.Errorf("source %s: extension initialization failed", s.Name)
+			// LOAD alone first: once the file lockdown is on, INSTALL is
+			// refused even for an installed extension, while LOAD of an
+			// already loaded one still succeeds.
+			if _, err := db.ExecContext(ctx, "LOAD "+s.Type); err != nil {
+				for _, q := range []string{"INSTALL " + s.Type, "LOAD " + s.Type} {
+					if _, err := db.ExecContext(ctx, q); err != nil {
+						return fmt.Errorf("source %s: extension initialization failed", s.Name)
+					}
 				}
 			}
 			loaded[s.Type] = true

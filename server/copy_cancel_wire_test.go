@@ -22,6 +22,7 @@ import (
 func startCopyWireServer(t *testing.T) (dir string, connect func(ctx context.Context) *pgx.Conn) {
 	t.Helper()
 	dir = t.TempDir()
+	useTestExchangeRoot(t)
 	cert, key := filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem")
 	if err := EnsureCertificates(cert, key); err != nil {
 		t.Fatal(err)
@@ -132,7 +133,7 @@ func TestCopyToFileCancelRequestStopsStatement(t *testing.T) {
 	conn := connect(ctx)
 	defer func() { _ = conn.Close(context.Background()) }()
 
-	out := filepath.Join(dir, "cancel.csv")
+	out := filepath.Join(FileExchangeDir(dir), "cancel.csv")
 	result := make(chan error, 1)
 	go func() {
 		_, err := conn.Exec(ctx, longCopyToFile(out))
@@ -170,7 +171,7 @@ func TestCopyToFileClientDisconnectStopsStatement(t *testing.T) {
 	defer cancel()
 	conn := connect(ctx)
 
-	out := filepath.Join(dir, "disconnect.csv")
+	out := filepath.Join(FileExchangeDir(dir), "disconnect.csv")
 	go func() { _, _ = conn.Exec(ctx, longCopyToFile(out)) }()
 	waitForFileGrowth(t, out, 1<<20)
 
@@ -200,7 +201,7 @@ func TestCopyToFileExtendedProtocolCancel(t *testing.T) {
 	conn := connect(ctx)
 	defer func() { _ = conn.Close(context.Background()) }()
 
-	out := filepath.Join(dir, "extended.csv")
+	out := filepath.Join(FileExchangeDir(dir), "extended.csv")
 	result := make(chan error, 1)
 	go func() {
 		rr := conn.PgConn().ExecParams(ctx, longCopyToFile(out), nil, nil, nil, nil)
@@ -241,7 +242,7 @@ func TestCopyToFileThreePartNameKeepsFormat(t *testing.T) {
 		{"lk.json", "FORMAT json", "read_json_auto"},
 		{"lk.csv", "FORMAT csv, HEADER true", "read_csv_auto"},
 	} {
-		path := filepath.Join(dir, tc.file)
+		path := filepath.Join(FileExchangeDir(dir), tc.file)
 		stmt := fmt.Sprintf(`COPY (SELECT * FROM "ducklake"."main"."lk") TO '%s' (%s)`, path, tc.format)
 		if _, err := conn.Exec(ctx, stmt); err != nil {
 			t.Fatalf("%s: %v", stmt, err)
@@ -265,7 +266,7 @@ func TestCopyToFileTerminateBackendFromAnotherSession(t *testing.T) {
 	admin := connect(ctx)
 	defer func() { _ = admin.Close(context.Background()) }()
 
-	out := filepath.Join(dir, "terminate.csv")
+	out := filepath.Join(FileExchangeDir(dir), "terminate.csv")
 	result := make(chan error, 1)
 	go func() {
 		_, err := conn.Exec(ctx, longCopyToFile(out))
@@ -364,7 +365,7 @@ func TestCopyToFileExtendedProtocolDisconnectWithPipelinedSync(t *testing.T) {
 	defer cancel()
 	conn := connect(ctx)
 
-	out := filepath.Join(dir, "extended-disconnect.csv")
+	out := filepath.Join(FileExchangeDir(dir), "extended-disconnect.csv")
 	go func() {
 		// ExecParams sends Parse, Bind, Describe, Execute and Sync together.
 		rr := conn.PgConn().ExecParams(ctx, longCopyToFile(out), nil, nil, nil, nil)

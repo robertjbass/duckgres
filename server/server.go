@@ -40,6 +40,11 @@ var startupReadTimeout = 30 * time.Second
 
 const bundledDuckDBExtensionsDir = "/app/extensions"
 
+// layerbaseDuckDBExtensionsDir is the deploy-verified, checksum-pinned
+// extension store Layerbase mounts read-only into database containers. The
+// file lockdown cannot install extensions, so they are seeded from here.
+const layerbaseDuckDBExtensionsDir = "/home/layerbase/.spindb/bin/duckgres-account/extensions"
+
 // SetProcessVersion sets the version string for this process. Called from main().
 func SetProcessVersion(v string) { processVersion = v }
 
@@ -770,7 +775,13 @@ func (s *Server) acquireFileDB(username string, passthrough bool) (*sql.DB, erro
 
 	if entry, ok := s.fileDBs[username]; ok {
 		if err := AttachSources(entry.db, s.cfg.Sources); err != nil {
-			return nil, err
+			// A locked instance cannot attach anything new, so a source the
+			// customer detached stays missing until the next start. Refusing
+			// the login would lock every client out of the database.
+			if !fileLockdownApplies(s.cfg) || errors.Is(err, errInvalidSourceConfig) {
+				return nil, err
+			}
+			slog.Warn("A saved source is not attached and cannot be reattached under the file lockdown; it returns on the next start.", "user", username, "error", err)
 		}
 		entry.refs++
 		return entry.db, nil
@@ -830,9 +841,9 @@ func (s *Server) releaseFileDB(username string) {
 // so performance is equivalent to in-memory while data persists across restarts.
 // When DataDir is empty, falls back to a pure in-memory database.
 func openBaseDB(cfg Config, username string) (*sql.DB, error) {
-	// allow_unsigned_extensions is a startup-only DuckDB config — it must be
-	// in the DSN, not via SET.
-	dsn := ":memory:?allow_unsigned_extensions=true"
+	// Only DuckDB-signed extensions load: allow_unsigned_extensions stays at
+	// its default (false), a startup-only setting customers cannot change.
+	dsn := ":memory:"
 	if cfg.FilePersistence && cfg.DataDir != "" && username != "" {
 		if strings.ContainsAny(username, "/\\") || strings.Contains(username, "..") {
 			return nil, fmt.Errorf("invalid username for file persistence: %q (contains path separator or ..)", username)
@@ -846,7 +857,9 @@ func openBaseDB(cfg Config, username string) (*sql.DB, error) {
 		if err := os.MkdirAll(cfg.DataDir, 0750); err != nil {
 			return nil, fmt.Errorf("failed to create data directory %s: %w", cfg.DataDir, err)
 		}
-		dsn = filepath.Join(cfg.DataDir, username+".duckdb") + "?allow_unsigned_extensions=true"
+		// Community extensions are off from the first statement; DuckDB
+		// refuses to turn them back on while the database runs.
+		dsn = filepath.Join(cfg.DataDir, username+".duckdb") + "?allow_community_extensions=false"
 		slog.Info("Opening file-backed DuckDB.", "path", dsn)
 	}
 	db, err := sql.Open("duckdb", dsn)
@@ -901,8 +914,10 @@ func openBaseDB(cfg Config, username string) (*sql.DB, error) {
 	// Set extension directory under DataDir so DuckDB doesn't rely on $HOME/.duckdb
 	// for autoloading/installing extensions.
 	extDir := filepath.Join(cfg.DataDir, "extensions")
-	if err := seedBundledExtensions(bundledDuckDBExtensionsDir, extDir); err != nil {
-		slog.Warn("Failed to seed bundled DuckDB extensions.", "source", bundledDuckDBExtensionsDir, "extension_directory", extDir, "error", err)
+	for _, source := range []string{bundledDuckDBExtensionsDir, layerbaseDuckDBExtensionsDir} {
+		if err := seedBundledExtensions(source, extDir); err != nil {
+			slog.Warn("Failed to seed bundled DuckDB extensions.", "source", source, "extension_directory", extDir, "error", err)
+		}
 	}
 	if _, err := db.Exec(fmt.Sprintf("SET extension_directory = '%s'", extDir)); err != nil {
 		slog.Warn("Failed to set DuckDB extension_directory.", "extension_directory", extDir, "error", err)
@@ -926,8 +941,21 @@ func openBaseDB(cfg Config, username string) (*sql.DB, error) {
 	if _, err := db.Exec("SET profiling_mode = 'detailed'"); err != nil {
 		slog.Warn("Failed to set DuckDB profiling mode.", "error", err)
 	}
-	if _, err := db.Exec("SET profiling_output = '/tmp/duckgres-profiling.json'"); err != nil {
+	profilingOutput := defaultProfilingOutput
+	if fileLockdownApplies(cfg) {
+		profilingOutput = FileProfilingOutput(cfg.DataDir)
+	}
+	if _, err := db.Exec("SET profiling_output = " + quoteSQLStringLiteral(profilingOutput)); err != nil {
 		slog.Warn("Failed to set DuckDB profiling output path.", "error", err)
+	} else {
+		profilingOutputPath.Store(profilingOutput)
+	}
+
+	if fileLockdownApplies(cfg) {
+		if err := prepareFileLockdownDirs(db, cfg); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("prepare file lockdown: %w", err)
+		}
 	}
 
 	// Configure cache_httpfs cache directory if the extension is loaded.
@@ -1037,6 +1065,10 @@ func CreateDBConnection(cfg Config, duckLakeSem chan struct{}, username string, 
 	}
 
 	if err := ConfigureDBConnection(db, cfg, duckLakeSem, username, serverStartTime, serverVersion); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := applyFileLockdown(db, cfg); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -1244,6 +1276,10 @@ func CreatePassthroughDBConnection(cfg Config, duckLakeSem chan struct{}, userna
 			_ = db.Close()
 			return nil, fmt.Errorf("failed to set DuckLake as default: %w", err)
 		}
+	}
+	if err := applyFileLockdown(db, cfg); err != nil {
+		_ = db.Close()
+		return nil, err
 	}
 
 	return db, nil
