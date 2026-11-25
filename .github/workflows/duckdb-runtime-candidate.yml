@@ -48,7 +48,12 @@ jobs:
         run: |
           go mod edit -require=github.com/duckdb/duckdb-go-bindings@${{ matrix.runtime.bindings }}
           if [ -n "${{ matrix.runtime.driver }}" ]; then
+            # Going to OLDER bindings: pin the driver and every per-platform
+            # library module too, or tidy keeps the newer DuckDB they carry.
             go mod edit -require=github.com/duckdb/duckdb-go/v2@${{ matrix.runtime.driver }}
+            for lib in $(go list -m all | awk '$1 ~ /^github.com\/duckdb\/duckdb-go-bindings\/lib\// { print $1 }'); do
+              go mod edit -require="$lib@${{ matrix.runtime.bindings }}"
+            done
           fi
           go mod tidy
           go list -m github.com/duckdb/duckdb-go-bindings | grep -qx "github.com/duckdb/duckdb-go-bindings ${{ matrix.runtime.bindings }}"
