@@ -2,7 +2,7 @@ name: DuckDB runtime candidate
 
 on:
   push:
-    branches: [fix/duckdb-2-cloud-sql, fix/stock-copy-cancel, feat/c823-extension-lockdown-stock]
+    branches: [fix/duckdb-2-cloud-sql, fix/stock-copy-cancel, feat/c823-extension-lockdown-stock, feat/c823-stock-lockdown-duckdb-1-5-2]
   workflow_dispatch:
 
 permissions:
@@ -19,6 +19,13 @@ jobs:
           - runner: ubuntu-24.04-arm
             arch: arm64
         runtime:
+          # Locked successor for databases pinned to v0.1.5-layerbase, which
+          # embeds DuckDB 1.5.2. Its driver is pinned too: the default driver
+          # requires newer bindings.
+          - duckdb: 1.5.2
+            bindings: v0.10502.0
+            driver: v2.10502.0
+            artifact_version: v0.1.10-layerbase
           - duckdb: 1.5.6
             bindings: v0.10506.0
             artifact_version: v0.1.9-layerbase
@@ -40,7 +47,20 @@ jobs:
       - name: Select exact stable bindings
         run: |
           go mod edit -require=github.com/duckdb/duckdb-go-bindings@${{ matrix.runtime.bindings }}
+          if [ -n "${{ matrix.runtime.driver }}" ]; then
+            # Going to OLDER bindings: pin the driver and every per-platform
+            # library module too, or tidy keeps the newer DuckDB they carry.
+            go mod edit -require=github.com/duckdb/duckdb-go/v2@${{ matrix.runtime.driver }}
+            for lib in $(grep -oE 'github.com/duckdb/duckdb-go-bindings/lib/[a-z0-9-]+' go.mod | sort -u); do
+              go mod edit -require="$lib@${{ matrix.runtime.bindings }}"
+            done
+          fi
           go mod tidy
+          go list -m github.com/duckdb/duckdb-go-bindings | grep -qx "github.com/duckdb/duckdb-go-bindings ${{ matrix.runtime.bindings }}"
+          if grep -E 'github.com/duckdb/duckdb-go-bindings/lib/' go.mod | grep -v -- " ${{ matrix.runtime.bindings }}"; then
+            echo "::error::a platform library is not on ${{ matrix.runtime.bindings }}"
+            exit 1
+          fi
       - name: Lint
         uses: golangci/golangci-lint-action@9fae48acfc02a90574d7c304a1758ef9895495fa # v7.0.1
         with:
@@ -58,7 +78,7 @@ jobs:
           status=$?
           set -e
           cat appender-diagnostic.txt
-          if [ "${{ matrix.runtime.duckdb }}" = "1.5.6" ] && [ "$status" -ne 0 ]; then exit "$status"; fi
+          if [ "${{ matrix.runtime.duckdb }}" != "2.0.0" ] && [ "$status" -ne 0 ]; then exit "$status"; fi
           if [ "${{ matrix.runtime.duckdb }}" = "2.0.0" ] && [ "$status" -ne 0 ]; then
             test "$status" -eq 1
             python3 scripts/check-appender-diagnostic.py appender-diagnostic.txt
