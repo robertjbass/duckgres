@@ -51,12 +51,16 @@ jobs:
             # Going to OLDER bindings: pin the driver and every per-platform
             # library module too, or tidy keeps the newer DuckDB they carry.
             go mod edit -require=github.com/duckdb/duckdb-go/v2@${{ matrix.runtime.driver }}
-            for lib in $(go list -m all | awk '$1 ~ /^github.com\/duckdb\/duckdb-go-bindings\/lib\// { print $1 }'); do
+            for lib in $(grep -oE 'github.com/duckdb/duckdb-go-bindings/lib/[a-z0-9-]+' go.mod | sort -u); do
               go mod edit -require="$lib@${{ matrix.runtime.bindings }}"
             done
           fi
           go mod tidy
           go list -m github.com/duckdb/duckdb-go-bindings | grep -qx "github.com/duckdb/duckdb-go-bindings ${{ matrix.runtime.bindings }}"
+          if grep -E 'github.com/duckdb/duckdb-go-bindings/lib/' go.mod | grep -v -- " ${{ matrix.runtime.bindings }}"; then
+            echo "::error::a platform library is not on ${{ matrix.runtime.bindings }}"
+            exit 1
+          fi
       - name: Lint
         uses: golangci/golangci-lint-action@9fae48acfc02a90574d7c304a1758ef9895495fa # v7.0.1
         with:
