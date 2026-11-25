@@ -122,8 +122,8 @@ jobs:
           bash scripts/qualify-external-postgres.sh "$PWD/server.test" "$DUCKGRES_QUALIFICATION_EXTENSIONS" "$PG_BIN"
       - name: Existing runtime wire regression
         run: just test-cloud-sql v1.5.6
-      - name: Full unit suite
-        run: just test-unit
+      - name: Full unit suite (Quack is DuckDB 2 only)
+        run: go test -v -p 1 -skip '^TestQuackNative' . ./duckdbservice/... ./server/... ./transpiler/...
       - name: Build candidate only
         run: |
           just build-release qualification-only
