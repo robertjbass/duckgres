@@ -2,7 +2,7 @@ name: Account connector qualification (no publication)
 
 on:
   push:
-    branches: [feat/external-quack-qualification, fix/file-mode-local-default-catalog, feat/lake-credential-reload, fix/copy-to-file-cancel, feat/c823-extension-lockdown-account]
+    branches: [feat/external-quack-qualification, fix/file-mode-local-default-catalog, feat/lake-credential-reload, fix/copy-to-file-cancel, feat/c823-extension-lockdown-account, feat/c823-account-lockdown-duckdb-1-5]
   workflow_dispatch:
 
 permissions:
@@ -72,6 +72,72 @@ jobs:
         if: always()
         with:
           name: account-connectors-qualification-${{ github.sha }}
+          path: |
+            candidate/
+            extension-checksums.txt
+          retention-days: 7
+          if-no-files-found: warn
+
+  # DuckDB 1.5 account runtime: PostgreSQL sources and the C-823 lockdown.
+  # Quack is a DuckDB 2 feature, so its native test is not part of this job.
+  native-1-5:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      GOMAXPROCS: '2'
+      GOFLAGS: -p=1
+      DUCKGRES_EXPECTED_DUCKDB_VERSION: v1.5.6
+      DUCKGRES_QUALIFICATION_EXTENSIONS: /tmp/qualification-extensions
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@f8a3cce218d9f83db3a2ecd90e41ac3de6cdfd9b
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.5'
+      - name: Select exact DuckDB 1.5 bindings
+        run: |
+          go mod edit -require=github.com/duckdb/duckdb-go-bindings@v0.10506.0
+          go mod tidy
+      - name: Fetch ABI-matched official extension artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p "$DUCKGRES_QUALIFICATION_EXTENSIONS/v1.5.6/linux_amd64"
+          for extension in httpfs postgres_scanner excel; do
+            curl --fail --location --retry 3 --max-time 120 "https://extensions.duckdb.org/v1.5.6/linux_amd64/${extension}.duckdb_extension.gz" | gzip -d > "$DUCKGRES_QUALIFICATION_EXTENSIONS/v1.5.6/linux_amd64/${extension}.duckdb_extension"
+          done
+          sha256sum "$DUCKGRES_QUALIFICATION_EXTENSIONS"/v1.5.6/linux_amd64/* > extension-checksums.txt
+      - name: Verify embedded version
+        run: just test-embedded-version v1.5.6
+      - name: COPY TO file cancel and disconnect on real DuckDB
+        if: ${{ !cancelled() }}
+        run: just test-copy-cancel v1.5.6
+      - name: Compile native fixture executable
+        if: ${{ !cancelled() }}
+        run: just build-account-connector-tests
+      - name: Isolated external PostgreSQL TLS and reconnect
+        if: ${{ !cancelled() }}
+        run: |
+          PG_BIN=$(dirname "$(find /usr/lib/postgresql -name initdb -type f | sort -V | tail -1)")
+          test -x "$PG_BIN/initdb"
+          bash scripts/qualify-external-postgres.sh "$PWD/server.test" "$DUCKGRES_QUALIFICATION_EXTENSIONS" "$PG_BIN"
+      - name: Existing runtime wire regression
+        run: just test-cloud-sql v1.5.6
+      - name: Full unit suite (Quack is DuckDB 2 only)
+        run: go test -v -p 1 -skip '^TestQuackNative' . ./duckdbservice/... ./server/... ./transpiler/...
+      - name: Build candidate only
+        run: |
+          just build-release qualification-only
+          mkdir -p candidate
+          cp duckgres candidate/duckgres-linux-amd64
+          ./duckgres --runtime-capabilities > candidate/capabilities.json
+          printf '%s\n' '${{ github.sha }}' > candidate/source-commit.txt
+          printf '%s\n' '{"duckdb_version":"v1.5.6","bindings_version":"v0.10506.0","platform":"linux_amd64","external_postgres_v1":true,"quack_v1":false,"copy_cancel_v1":true,"file_lockdown_v1":true,"publication":false}' > candidate/qualification.json
+          cp extension-checksums.txt go.mod go.sum candidate/
+          sha256sum candidate/duckgres-linux-amd64 > candidate/checksums.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: account-connectors-qualification-duckdb-1.5.6-${{ github.sha }}
           path: |
             candidate/
             extension-checksums.txt
